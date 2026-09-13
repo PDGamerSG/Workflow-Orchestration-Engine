@@ -2,11 +2,11 @@ import { Ajv, type ValidateFunction } from "ajv";
 import type { LlmProvider } from "../llm/provider";
 import { costUsd, type Pricing } from "../llm/pricing";
 import { cacheKey } from "./cache";
-import type { EventBus } from "./events";
+import { commit, type EventBus, type PendingEvent } from "./events";
 import { descendants } from "./graph";
 import type { TokenBucket } from "./rate-limiter";
 import { backoffMs, classifyError, OutputValidationError } from "./retry";
-import type { EventRow, RunRow, StepPatch, StepRow, Store } from "./store";
+import type { RunRow, StepPatch, StepRow, Store } from "./store";
 import { renderTemplate, type TemplateContext } from "./template";
 import type { Clock, NormalizedGraph, NormalizedStep, RunStatus, Usage } from "./types";
 
@@ -145,7 +145,7 @@ export class RunScheduler {
       () => pending.every((id) => this.patchStep(id, { status: "skipped", error: "budget exceeded" })),
       [
         ["run.budget_exceeded", { totals, budgetTokens, budgetUsd }],
-        ...pending.map((stepId) => ["step.skipped", { stepId, reason: "budget exceeded" }] as [string, unknown]),
+        ...pending.map((stepId) => ["step.skipped", { stepId, reason: "budget exceeded" }] as PendingEvent),
       ],
     );
   }
@@ -369,29 +369,13 @@ export class RunScheduler {
    * Applies `mutate` and appends `events` in one transaction. If a fenced write fails,
    * the transaction rolls back and the scheduler stops with LeaseLost.
    */
-  private write(mutate: () => boolean, events: [string, unknown][]): void {
-    const { store, bus, clock } = this.deps;
-    let rows: EventRow[] = [];
+  private write(mutate: () => boolean, events: PendingEvent[]): void {
     const before = new Map(this.steps);
-    try {
-      rows = store.tx(() => {
-        if (!mutate()) throw new LeaseLost();
-        const now = clock.now();
-        return events.map(([type, payload]) => ({
-          id: store.appendEvent(this.runId, type, payload, now),
-          runId: this.runId,
-          type,
-          payload,
-          createdAt: now,
-        }));
-      });
-    } catch (err) {
-      if (!(err instanceof LeaseLost)) throw err;
-      this.steps = before;
-      this.lost = true;
-      this.controller.abort(err);
-      throw err;
-    }
-    for (const row of rows) bus.publish(row);
+    if (commit(this.deps, this.runId, mutate, events)) return;
+    this.steps = before;
+    this.lost = true;
+    const err = new LeaseLost();
+    this.controller.abort(err);
+    throw err;
   }
 }

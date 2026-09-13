@@ -214,6 +214,25 @@ describe("leases", () => {
     expect(store.getRun("run_1")!.status).toBe("running");
   });
 
+  test("fenced writes fail once the run is no longer active, even for the lease owner", () => {
+    newRun();
+    store.installGraph("run_1", chain, 1, [], 2_000);
+    store.claimRun("run_1", "w1", 1_000, 30_000);
+    store.setRunStatus("run_1", "cancelled", null, 3_000);
+
+    expect(store.updateStep("run_1", "a", { status: "succeeded" }, "w1")).toBe(false);
+    expect(store.setRunStatus("run_1", "succeeded", null, 4_000, "w1")).toBe(false);
+    expect(store.getRun("run_1")!.status).toBe("cancelled");
+  });
+
+  test("resetSteps can restart attempt counts", () => {
+    newRun();
+    store.installGraph("run_1", chain, 1, [], 2_000);
+    store.updateStep("run_1", "a", { status: "failed", attempt: 3 });
+    store.resetSteps("run_1", ["failed"], "pending", undefined, true);
+    expect(store.getSteps("run_1")[0]).toMatchObject({ status: "pending", attempt: 0 });
+  });
+
   test("claimableRuns lists unleased and expired active runs", () => {
     newRun("run_a");
     newRun("run_b", "planning");

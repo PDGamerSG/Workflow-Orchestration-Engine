@@ -1,4 +1,4 @@
-import { Database, type SQLQueryBindings } from "bun:sqlite";
+import { Database, type SQLQueryBindings, type Statement } from "bun:sqlite";
 import type { NormalizedGraph, Profile, RunStatus, Source, StepStatus, Usage } from "./types";
 
 export type NewRun = {
@@ -126,8 +126,10 @@ CREATE TABLE IF NOT EXISTS step_cache (
 );
 `;
 
-// A write guarded by a fence only lands while `fence` holds the run's lease.
-const FENCE = "EXISTS (SELECT 1 FROM runs WHERE runs.id = ? AND runs.lease_owner = ?)";
+// A write guarded by a fence only lands while `fence` holds the run's lease and the run is still active.
+// A cancel from any process therefore blocks the owner's writes right away, before its next heartbeat.
+const FENCE =
+  "EXISTS (SELECT 1 FROM runs WHERE runs.id = ? AND runs.lease_owner = ? AND runs.status IN ('planning', 'running'))";
 
 const STEP_COLUMNS: Record<keyof StepPatch, string> = {
   status: "status",
@@ -155,7 +157,24 @@ export class Store {
   }
 
   close(): void {
+    for (const statement of this.statements.values()) statement.finalize();
+    this.statements.clear();
     this.db.close();
+  }
+
+  /**
+   * Prepared statements, finalized in close(). Bun's own db.query() cache can drop statements
+   * without finalizing them, which leaves the database file open after close().
+   */
+  private readonly statements = new Map<string, Statement>();
+
+  private q(sql: string): Statement {
+    let statement = this.statements.get(sql);
+    if (!statement) {
+      statement = this.db.prepare(sql);
+      this.statements.set(sql, statement);
+    }
+    return statement;
   }
 
   /**
@@ -168,8 +187,8 @@ export class Store {
   }
 
   createRun(r: NewRun): void {
-    this.db
-      .query(
+    this
+      .q(
         `INSERT INTO runs (id, goal, profile, status, concurrency, max_replans, budget_tokens, budget_usd, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
@@ -177,16 +196,16 @@ export class Store {
   }
 
   getRun(id: string): RunRow | null {
-    const row = this.db.query("SELECT * FROM runs WHERE id = ?").get(id) as Record<string, unknown> | null;
+    const row = this.q("SELECT * FROM runs WHERE id = ?").get(id) as Record<string, unknown> | null;
     return row ? toRun(row) : null;
   }
 
   listRuns(limit: number): RunSummary[] {
-    const rows = this.db.query("SELECT * FROM runs ORDER BY created_at DESC, id DESC LIMIT ?").all(limit) as Record<
+    const rows = this.q("SELECT * FROM runs ORDER BY created_at DESC, id DESC LIMIT ?").all(limit) as Record<
       string,
       unknown
     >[];
-    const counts = this.db.query("SELECT status, COUNT(*) AS n FROM steps WHERE run_id = ? GROUP BY status");
+    const counts = this.q("SELECT status, COUNT(*) AS n FROM steps WHERE run_id = ? GROUP BY status");
 
     return rows.map((row) => {
       const { graph: _graph, ...run } = toRun(row);
@@ -230,13 +249,13 @@ export class Store {
       );
       if (!updated) return false;
 
-      const retire = this.db.query("UPDATE steps SET status = 'superseded' WHERE run_id = ? AND step_id = ?");
+      const retire = this.q("UPDATE steps SET status = 'superseded' WHERE run_id = ? AND step_id = ?");
       for (const id of supersede) retire.run(runId, id);
 
-      const { next } = this.db.query("SELECT COALESCE(MAX(seq), -1) + 1 AS next FROM steps WHERE run_id = ?").get(runId) as {
+      const { next } = this.q("SELECT COALESCE(MAX(seq), -1) + 1 AS next FROM steps WHERE run_id = ?").get(runId) as {
         next: number;
       };
-      const insert = this.db.query(
+      const insert = this.q(
         "INSERT OR IGNORE INTO steps (run_id, step_id, graph_version, status, seq) VALUES (?, ?, ?, 'pending', ?)",
       );
       graph.order.forEach((id, i) => insert.run(runId, id, version, next + i));
@@ -245,7 +264,7 @@ export class Store {
   }
 
   getSteps(runId: string): StepRow[] {
-    const rows = this.db.query("SELECT * FROM steps WHERE run_id = ? ORDER BY seq").all(runId) as Record<string, unknown>[];
+    const rows = this.q("SELECT * FROM steps WHERE run_id = ? ORDER BY seq").all(runId) as Record<string, unknown>[];
     return rows.map(toStep);
   }
 
@@ -283,28 +302,32 @@ export class Store {
     );
   }
 
-  /** Moves steps in any of `from` to `to`, clearing error and finish time. Returns the count moved. */
-  resetSteps(runId: string, from: StepStatus[], to: StepStatus, fence?: string): number {
+  /**
+   * Moves steps in any of `from` to `to`, clearing error and finish time. Returns the count moved.
+   * `clearAttempts` restarts the retry count, which a manual retry of a failed run needs.
+   */
+  resetSteps(runId: string, from: StepStatus[], to: StepStatus, fence?: string, clearAttempts = false): number {
     const placeholders = from.map(() => "?").join(", ");
-    let sql = `UPDATE steps SET status = ?, error = NULL, finished_at = NULL WHERE run_id = ? AND status IN (${placeholders})`;
+    const attempts = clearAttempts ? ", attempt = 0" : "";
+    let sql = `UPDATE steps SET status = ?, error = NULL, finished_at = NULL${attempts} WHERE run_id = ? AND status IN (${placeholders})`;
     const params: SQLQueryBindings[] = [to, runId, ...from];
     if (fence) {
       sql += ` AND ${FENCE}`;
       params.push(runId, fence);
     }
-    return this.db.query(sql).run(...params).changes;
+    return this.q(sql).run(...params).changes;
   }
 
   totals(runId: string): Totals {
-    const steps = this.db
-      .query(
+    const steps = this
+      .q(
         `SELECT COALESCE(SUM(input_tokens), 0) AS i, COALESCE(SUM(output_tokens), 0) AS o,
                 COALESCE(SUM(search_calls), 0) AS s, COALESCE(SUM(cost_usd), 0) AS c
          FROM steps WHERE run_id = ?`,
       )
       .get(runId) as { i: number; o: number; s: number; c: number };
-    const planning = this.db
-      .query("SELECT planning_input_tokens AS i, planning_output_tokens AS o, planning_cost_usd AS c FROM runs WHERE id = ?")
+    const planning = this
+      .q("SELECT planning_input_tokens AS i, planning_output_tokens AS o, planning_cost_usd AS c FROM runs WHERE id = ?")
       .get(runId) as { i: number; o: number; c: number } | null;
 
     return {
@@ -317,15 +340,15 @@ export class Store {
   }
 
   appendEvent(runId: string, type: string, payload: unknown, now: number): number {
-    const result = this.db
-      .query("INSERT INTO events (run_id, type, payload_json, created_at) VALUES (?, ?, ?, ?)")
+    const result = this
+      .q("INSERT INTO events (run_id, type, payload_json, created_at) VALUES (?, ?, ?, ?)")
       .run(runId, type, JSON.stringify(payload), now);
     return Number(result.lastInsertRowid);
   }
 
   eventsAfter(runId: string, afterId: number, limit = 500): EventRow[] {
-    const rows = this.db
-      .query("SELECT * FROM events WHERE run_id = ? AND id > ? ORDER BY id LIMIT ?")
+    const rows = this
+      .q("SELECT * FROM events WHERE run_id = ? AND id > ? ORDER BY id LIMIT ?")
       .all(runId, afterId, limit) as Record<string, unknown>[];
     return rows.map((r) => ({
       id: r.id as number,
@@ -338,8 +361,8 @@ export class Store {
 
   claimRun(runId: string, workerId: string, now: number, ttlMs: number): boolean {
     return (
-      this.db
-        .query(
+      this
+        .q(
           `UPDATE runs SET lease_owner = ?, lease_expires_at = ?
            WHERE id = ? AND status IN ('planning', 'running')
              AND (lease_owner IS NULL OR lease_expires_at < ?)`,
@@ -350,21 +373,21 @@ export class Store {
 
   heartbeat(runId: string, workerId: string, now: number, ttlMs: number): boolean {
     return (
-      this.db
-        .query("UPDATE runs SET lease_expires_at = ? WHERE id = ? AND lease_owner = ?")
+      this
+        .q("UPDATE runs SET lease_expires_at = ? WHERE id = ? AND lease_owner = ?")
         .run(now + ttlMs, runId, workerId).changes === 1
     );
   }
 
   releaseRun(runId: string, workerId: string): void {
-    this.db
-      .query("UPDATE runs SET lease_owner = NULL, lease_expires_at = NULL WHERE id = ? AND lease_owner = ?")
+    this
+      .q("UPDATE runs SET lease_owner = NULL, lease_expires_at = NULL WHERE id = ? AND lease_owner = ?")
       .run(runId, workerId);
   }
 
   claimableRuns(now: number): string[] {
-    const rows = this.db
-      .query(
+    const rows = this
+      .q(
         `SELECT id FROM runs WHERE status IN ('planning', 'running')
            AND (lease_owner IS NULL OR lease_expires_at < ?)
          ORDER BY created_at`,
@@ -374,7 +397,7 @@ export class Store {
   }
 
   cacheGet(key: string): { output: string; sources: Source[] } | null {
-    const row = this.db.query("SELECT output, sources_json FROM step_cache WHERE key = ?").get(key) as {
+    const row = this.q("SELECT output, sources_json FROM step_cache WHERE key = ?").get(key) as {
       output: string;
       sources_json: string | null;
     } | null;
@@ -382,8 +405,8 @@ export class Store {
   }
 
   cachePut(key: string, output: string, sources: Source[], now: number): void {
-    this.db
-      .query("INSERT OR REPLACE INTO step_cache (key, output, sources_json, created_at) VALUES (?, ?, ?, ?)")
+    this
+      .q("INSERT OR REPLACE INTO step_cache (key, output, sources_json, created_at) VALUES (?, ?, ?, ?)")
       .run(key, output, JSON.stringify(sources), now);
   }
 
@@ -392,7 +415,7 @@ export class Store {
       sql += ` AND ${FENCE}`;
       params = [...params, runId, fence];
     }
-    return this.db.query(sql).run(...params).changes > 0;
+    return this.q(sql).run(...params).changes > 0;
   }
 }
 
