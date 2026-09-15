@@ -7,6 +7,7 @@ const EnvSchema = z
     GOOGLE_API_KEY: z.string().trim().optional(),
     GEMINI_MODEL: z.string().default("gemini-3.5-flash"),
     GEMINI_RPM: z.coerce.number().int().positive().default(60),
+    SEARCH_ENABLED: z.enum(["true", "false"]).default("true"),
     DATABASE_PATH: z.string().default("data/relay.db"),
     PORT: z.coerce.number().int().min(0).max(65_535).default(4000),
     WEB_ORIGIN: z.string().default("http://localhost:3000"),
@@ -23,6 +24,7 @@ export type Config = {
   googleApiKey: string | undefined;
   model: string;
   rpm: number;
+  searchEnabled: boolean;
   databasePath: string;
   port: number;
   webOrigin: string;
@@ -42,6 +44,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     googleApiKey: e.GOOGLE_API_KEY,
     model: e.GEMINI_MODEL,
     rpm: e.GEMINI_RPM,
+    searchEnabled: e.SEARCH_ENABLED === "true",
     databasePath: e.DATABASE_PATH,
     port: e.PORT,
     webOrigin: e.WEB_ORIGIN,

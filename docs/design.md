@@ -148,6 +148,9 @@ runs (
   replans INTEGER NOT NULL DEFAULT 0,
   budget_tokens INTEGER,
   budget_usd REAL,
+  planning_input_tokens INTEGER NOT NULL DEFAULT 0,   -- planner and replanner calls
+  planning_output_tokens INTEGER NOT NULL DEFAULT 0,
+  planning_cost_usd REAL NOT NULL DEFAULT 0,
   lease_owner TEXT,
   lease_expires_at INTEGER,     -- epoch ms
   created_at INTEGER NOT NULL,
@@ -196,7 +199,7 @@ Every state change and its event are written in one transaction. The event id is
 
 ### Event types
 
-`run.planning`, `run.planned`, `run.started`, `step.started`, `step.retrying`, `step.succeeded`, `step.failed`, `step.skipped`, `run.replanned`, `run.budget_exceeded`, `run.lease_taken`, `run.succeeded`, `run.failed`, `run.cancelled`.
+`run.created`, `run.planned`, `step.started`, `step.retrying`, `step.succeeded`, `step.failed`, `step.skipped`, `run.replanned`, `run.replan_failed`, `run.budget_exceeded`, `run.lease_taken`, `run.retried`, `run.succeeded`, `run.failed`, `run.cancelled`.
 
 ## Engine
 
@@ -228,7 +231,7 @@ The scheduler for one run keeps an in-memory view of the step table, loaded from
 1. Resolve templates. Write `status=running`, `attempt+1`, and `resolved_prompt`, and emit `step.started`.
 2. If `cache` is on, look up the cache key. On a hit, save the output with `cached=1`, zero cost, and finish.
 3. Wait for a rate limiter token. Waiting time does not count against the timeout.
-4. Call the provider with `AbortSignal.any([runAbort, AbortSignal.timeout(timeoutMs)])`.
+4. Call the provider with a signal that aborts on run abort or when `timeoutMs` passes. The timeout runs on the injected clock, so tests drive it without sleeping.
 5. On success with `output.type = "json"`, parse the text and validate it against the schema with Ajv. A parse or schema failure counts as a retryable error, and the next attempt's prompt gets the validation error appended.
 6. Save output, sources, and usage, and emit `step.succeeded`.
 
@@ -245,8 +248,13 @@ A retryable error with attempts left waits `min(30s, 1s * 2^(attempt-1)) * rando
 
 When a step fails for good:
 
-1. If the run has a goal and `replans < max_replans` (default 2), the engine calls the replanner. It sends the goal, the current graph, the output of every succeeded step truncated to 2,000 characters, and the failed step with its error. The replanner returns replacement steps. Validation runs on the merged graph: succeeded steps stay, the failed step and its not-yet-succeeded descendants become `superseded`, and new steps are added with the next `graph_version`. New ids may not reuse a superseded id. The run emits `run.replanned` and scheduling continues.
-2. Otherwise every descendant of the failed step becomes `skipped`. Independent branches keep running, and the run ends `failed`.
+1. If the run has a goal and `replans < max_replans` (default 2), the engine calls the replanner. It sends the goal, the failed step's prompt and error, and the output of every succeeded step truncated to 2,000 characters.
+2. The model writes 1 to 3 replacement steps. They may reference only succeeded steps or each other. The last one stands in for the failed step and inherits its output contract (text, or the same JSON schema).
+3. Code does the graph surgery, not the model. The failed step and its unfinished descendants become `superseded`. Each descendant is recreated under a new id (`report` becomes `report_r2`) with its template references renamed, so `{{failed.output.x}}` becomes `{{replacement.output.x}}`. Ids that collide with existing rows get the next free `_rN` suffix.
+4. The merged graph goes through `validateGraph`. Issues go back to the model, up to 3 attempts. On success the engine installs it as the next `graph_version`, emits `run.replanned`, and the scheduler reloads and continues.
+5. If there are no re-plans left, or re-planning fails, every descendant of the failed step becomes `skipped`. Independent branches keep running, and the run ends `failed`.
+
+Failure hooks run one at a time, so two branches failing together cannot replan over each other.
 
 ### Budgets
 
@@ -264,10 +272,10 @@ The key is `sha256(JSON.stringify([model, resolvedPrompt, tools, outputSchema]))
 
 Each engine process gets a `workerId` (a random UUID) at start.
 
-- **Claim.** `UPDATE runs SET lease_owner=?, lease_expires_at=now+30s WHERE id=? AND status='running' AND (lease_owner IS NULL OR lease_expires_at < now)`. The process runs the scheduler only if the update changed one row.
+- **Claim.** `UPDATE runs SET lease_owner=?, lease_expires_at=now+30s WHERE id=? AND status IN ('planning','running') AND (lease_owner IS NULL OR lease_expires_at < now)`. The process drives the run only if the update changed one row. A run claimed while `planning` is planned again from the start.
 - **Heartbeat.** Every 10 seconds the owner extends the lease with `WHERE id=? AND lease_owner=?`. If that changes zero rows, another process took the run. The owner aborts its scheduler and drops its in-flight results without writing them.
 - **Sweeper.** Every 5 seconds, and once at startup, each process looks for `running` runs with no live lease and claims them. A claimed run resets its `running` steps to `pending`, keeping their attempt counts, and emits `run.lease_taken`.
-- **Fencing.** Every step write includes `AND EXISTS (SELECT 1 FROM runs WHERE id=? AND lease_owner=?)`. A stale owner that wakes up after losing its lease cannot overwrite the new owner's work.
+- **Fencing.** Every owner write includes `AND EXISTS (SELECT 1 FROM runs WHERE id=? AND lease_owner=? AND status IN ('planning','running'))`. A stale owner that wakes up after losing its lease cannot overwrite the new owner's work. Because the fence also checks status, a cancel written by any process blocks the owner's writes at once, and the owner's next heartbeat aborts its in-flight calls.
 - **Graceful shutdown.** On SIGINT or SIGTERM the process stops claiming, aborts in-flight calls, resets its running steps to `pending`, clears its leases, and exits. Another process, or the next start, resumes right away without waiting 30 seconds.
 
 This gives at-least-once execution per step. A step killed in the middle of a model call runs again, which is acceptable for model calls because they have no side effects. A succeeded step never runs again.
@@ -276,22 +284,22 @@ This gives at-least-once execution per step. A step killed in the middle of a mo
 
 `POST /runs` with `{ goal, profile }` creates a run in `planning` and returns at once. Planning happens in the background.
 
-1. Build the prompt from the profile's system instructions, the step format rules, and the goal.
-2. Call Gemini with `responseMimeType: "application/json"` and a JSON schema for `Graph`, produced by `z.toJSONSchema`.
-3. Run `validateGraph`. On issues, send the model its previous output and the issue list, up to 3 attempts in total.
-4. On success, save the graph as version 1, create the step rows, emit `run.planned`, and start scheduling.
+1. Build the prompt for the run's profile.
+2. Call the model with `responseMimeType: "application/json"` and a hand-written response schema. A step's output schema travels as a JSON string (`outputJsonSchema`), because Gemini's schema subset cannot describe "any JSON Schema".
+3. Convert the reply to `StepDef`s and run `validateGraph`. On issues, send the model its previous reply and the issue list, up to 3 attempts in total.
+4. On success, save the graph as version 1 together with the planning token usage, emit `run.planned`, and start scheduling. After 3 failed attempts the run ends `failed` with the last issues in the `run.failed` event.
 
 ### Profiles
 
-**general.** Break the goal into 2 to 12 steps. Prefer parallel branches when parts do not depend on each other.
+**general.** The model writes 2 to 12 steps. The prompt tells it to keep independent work free of dependencies so it runs in parallel. If no step is marked `final`, the last step nothing depends on gets the mark.
 
-**research.** A fixed shape, filled in by the model:
+**research.** The model only picks 3 to 6 sub-questions. Code builds the graph from them, so the shape is guaranteed:
 
-1. 3 to 6 `research_*` steps, one per sub-question, each with `tools: ["search"]` and JSON output `{ findings: [{ claim, sourceIndex }] }`.
-2. One `verify` step that depends on all research steps, uses search, and returns JSON `{ confirmed: [...], disputed: [{ claim, reason }] }`.
-3. One `write` step marked `final`. It depends on `verify` and every research step, uses their outputs and `{{research_x.sources}}`, and writes a markdown report with numbered citations.
+1. One `research_<topic>` step per sub-question with search and JSON output `{ summary, findings[] }`.
+2. One `verify` step that reads every research output, uses search, and returns JSON `{ confirmed[], disputed[{ claim, reason }] }`.
+3. One `write` step marked `final` that reads the research outputs, their `{{research_x.sources}}`, and the fact check, and writes a markdown report with one numbered reference list.
 
-The planner rejects a research graph that does not have this shape and retries with the reason.
+`SEARCH_ENABLED=false` builds the same graph without search and tells the steps to answer from model knowledge without inventing citations. It exists for API keys that have no grounding quota.
 
 ## LLM provider
 
@@ -371,10 +379,12 @@ Live updates use one `EventSource` per page. A reducer applies each event to the
 
 | Variable | Default |
 |---|---|
-| `GOOGLE_API_KEY` | required unless `LLM_PROVIDER=fake` |
-| `LLM_PROVIDER` | `gemini` |
+| `GOOGLE_API_KEY` | required unless `LLM_PROVIDER=demo` |
+| `LLM_PROVIDER` | `gemini`, or `demo` for scripted replies with no key |
 | `GEMINI_MODEL` | `gemini-3.5-flash` |
-| `GEMINI_RPM` | `60` |
+| `GEMINI_RPM` | `60`. Set `5` on the Gemini free tier. |
+| `SEARCH_ENABLED` | `true` |
+| `PRICE_INPUT_PER_M`, `PRICE_OUTPUT_PER_M`, `PRICE_SEARCH_PER_K` | Gemini 3.5 Flash list prices |
 | `DATABASE_PATH` | `data/relay.db` |
 | `PORT` | `4000` |
 | `WEB_ORIGIN` | `http://localhost:3000` |
