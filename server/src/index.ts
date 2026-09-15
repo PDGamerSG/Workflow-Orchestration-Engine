@@ -1,87 +1,44 @@
-import express from "express";
-import { z } from "zod";
-import { GoogleGenAI } from "@google/genai";
+import { mkdirSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { createApp } from "./api/app";
+import { loadConfig } from "./config";
+import { Engine } from "./engine/engine";
+import { Store } from "./engine/store";
+import { createDemoProvider } from "./llm/demo";
+import { GeminiProvider } from "./llm/gemini";
+import type { LlmProvider } from "./llm/provider";
 
-const ai = new GoogleGenAI({
-    apiKey: process.env.GOOGLE_API_KEY
+const config = loadConfig(process.env);
+
+// Absolute path: bun on Windows throws EEXIST from a recursive mkdir of an existing relative path with "..".
+const databasePath = resolve(config.databasePath);
+mkdirSync(dirname(databasePath), { recursive: true });
+const store = new Store(databasePath);
+
+const provider: LlmProvider =
+  config.provider === "gemini"
+    ? new GeminiProvider({ apiKey: config.googleApiKey!, model: config.model })
+    : createDemoProvider();
+
+const engine = new Engine({ store, provider, pricing: config.pricing, rpm: config.rpm });
+const app = createApp({ engine, store, webOrigin: config.webOrigin });
+
+engine.start();
+const server = app.listen(config.port, () => {
+  console.log(`[relay] worker ${engine.workerId} on http://localhost:${config.port} (provider: ${provider.model}, db: ${databasePath})`);
 });
 
-const StepGraph = z.array(z.object({
-    id: z.string(),
-    prompt: z.string(),
-    dependsOn: z.array(z.string()).optional()
-}))
-
-type StepGraph = z.infer<typeof StepGraph>
-
-const CreateWorkflowSchema = z.object({
-    workflowId: z.string(),
-    steps: StepGraph
-})
-
-const CreateWorkflowResponse = z.object({
-    results: z.array(z.object({
-        id: z.string(),
-        result: z.string()
-    }))
-})
-
-const app = express();
-app.use(express.json())
-
-app.post("/workflow", async (req, res) => {
-    const workflow = req.body.workflow;
-    const { success, data, error } = CreateWorkflowSchema.safeParse(workflow);
-
-    if (!success) {
-        res.status(411).json({
-            message: "incorrect inputs"
-        })
-        return;
-    }
-    const result = await resolveGraph(data.steps);
-
-    res.json({
-        result
-    })
-})
-
-function resolveGraph(graph: StepGraph): Promise<{result: string, id: string}[]>  {
-    return new Promise(async (resolve) => {
-        if (!graph.length) {
-            resolve([])
-            return
-        }
-        const canResolveNowNodes = graph.filter(x => !x.dependsOn || x.dependsOn.length == 0); // [{"id": "A", "command": "sleep 2"}]
-        const promises = canResolveNowNodes.map(node => runAgent(node.prompt))
-        const results = await Promise.all(promises);
-        graph = graph.map(g => {
-            if (g.dependsOn) {
-                return {
-                    ...g,
-                    dependsOn: g.dependsOn.filter(id => !canResolveNowNodes.map(x => x.id).includes(id))
-                }
-            } else {
-                return g
-            }
-        }).filter(node => !canResolveNowNodes.map(x => x.id).includes(node.id))
-
-        resolve([...results.map((r, index) => ({
-            result: r.result!,
-            id: canResolveNowNodes[index]?.id!
-        })), ...await resolveGraph(graph)])
-    })
+let shuttingDown = false;
+async function shutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[relay] ${signal}: handing runs back and shutting down`);
+  server.close();
+  server.closeAllConnections(); // SSE streams would otherwise keep the server open
+  await engine.stop({ graceful: true });
+  store.close();
+  process.exit(0);
 }
 
-function runAgent(prompt: string): Promise<{result: string}> {
-    console.log("ran prompt " + prompt);
-    return new Promise(async (resolve) => {
-        const response = await ai.models.generateContent({
-            model: "gemini-3.5-flash",
-            contents: prompt,
-          });
-          resolve({result: response.text!});
-    })
-}
-
-app.listen(4000);
+process.on("SIGINT", () => void shutdown("SIGINT"));
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
