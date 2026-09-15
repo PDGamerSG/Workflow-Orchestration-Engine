@@ -1,15 +1,13 @@
-# agent-project
+# Relay
 
-To install dependencies:
+A durable workflow engine for LLM agents. Design notes live in [docs/design.md](docs/design.md).
+
+## Setup
 
 ```bash
 bun install
+echo "GOOGLE_API_KEY=your-key" > .env
+bun run dev
 ```
 
-To run:
-
-```bash
-bun run index.ts
-```
-
-This project was created using `bun init` in bun v1.3.13. [Bun](https://bun.com) is a fast all-in-one JavaScript runtime.
+The engine server listens on port 4000.
