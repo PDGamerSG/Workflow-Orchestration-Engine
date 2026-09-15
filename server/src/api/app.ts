@@ -41,9 +41,9 @@ export function createApp({ engine, store, webOrigin, ssePollMs }: AppDeps): exp
   });
 
   app.get("/runs/:id", (req, res) => {
-    const run = store.getRun(req.params.id);
-    if (!run) throw new NotFoundError(`run ${req.params.id} not found`);
-    res.json({ run, steps: store.getSteps(run.id), totals: store.totals(run.id) });
+    const snapshot = store.snapshot(req.params.id);
+    if (!snapshot) throw new NotFoundError(`run ${req.params.id} not found`);
+    res.json(snapshot);
   });
 
   app.get("/runs/:id/events", (req, res) => {

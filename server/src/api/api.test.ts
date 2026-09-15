@@ -99,6 +99,7 @@ describe("HTTP API", () => {
       ["b", "succeeded", "b-out"],
     ]);
     expect(body.totals).toEqual({ inputTokens: 18, outputTokens: 10, searchCalls: 0, costUsd: 0 });
+    expect(body.lastEventId).toBe(store.eventsAfter(runId, 0).at(-1)!.id);
 
     const list = (await (await fetch(`${base}/runs`)).json()) as any;
     expect(list.runs[0]).toMatchObject({ id: runId, stepCounts: { succeeded: 2 } });
