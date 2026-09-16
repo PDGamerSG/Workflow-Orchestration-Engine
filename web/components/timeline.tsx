@@ -1,3 +1,4 @@
+import { eventStepId } from "@/lib/events";
 import { formatCost, formatDuration } from "@/lib/format";
 import type { RunEvent } from "@/lib/types";
 
@@ -53,18 +54,31 @@ export function describeEvent(event: RunEvent): string {
   }
 }
 
-export function Timeline({ events, startedAt }: { events: RunEvent[]; startedAt: number }) {
+export function Timeline({ events, startedAt, onSelectStep }: { events: RunEvent[]; startedAt: number; onSelectStep: (stepId: string) => void }) {
   if (events.length === 0) return <p className="hint">Events from this session appear here as the run progresses.</p>;
   return (
     <ol style={{ fontSize: 14 }}>
-      {events.map((event) => (
-        <li key={event.id} className="grid gap-4" style={{ gridTemplateColumns: "72px 1fr", padding: "6px 0", borderTop: "1px solid var(--rule)" }}>
-          <span style={{ color: "var(--ink-3)", textAlign: "right" }}>+{formatDuration(event.createdAt - startedAt)}</span>
+      {events.map((event) => {
+        const stepId = eventStepId(event);
+        const text = (
           <span className="break-words" data-type={event.type} style={{ color: event.type.endsWith("failed") ? "var(--stop)" : undefined }}>
             {describeEvent(event)}
           </span>
-        </li>
-      ))}
+        );
+        return (
+          <li key={event.id} className="grid gap-4" style={{ gridTemplateColumns: "72px 1fr", padding: "6px 0", borderTop: "1px solid var(--rule)" }}>
+            <span style={{ color: "var(--ink-3)", textAlign: "right" }}>+{formatDuration(event.createdAt - startedAt)}</span>
+            {/* An event about a step opens that step, so the timeline leads back to the graph. */}
+            {stepId ? (
+              <button type="button" className="event-row" onClick={() => onSelectStep(stepId)} title={`Show ${stepId}`}>
+                {text}
+              </button>
+            ) : (
+              text
+            )}
+          </li>
+        );
+      })}
     </ol>
   );
 }

@@ -1,27 +1,41 @@
 import { GENERAL_PLAN_INTRO, REPLAN_INTRO, RESEARCH_PLAN_INTRO } from "../planner/profiles";
 import { FakeProvider } from "./fake";
-import type { LlmRequest } from "./provider";
+import { LlmError, type LlmRequest } from "./provider";
 
 /**
  * A keyless provider for trying the dashboard. Replies take `minDelayMs` to `minDelayMs + 1000` ms.
  * Planner prompts get a working plan, other JSON requests get a value shaped like their schema,
  * and search requests return example sources.
+ *
+ * `failureRate` makes that share of step calls fail like an overloaded API, which is how the
+ * retry, re-plan and skip paths can be watched without a key. Planner calls never fail, or
+ * there would be no graph to repair.
  */
-export function createDemoProvider(opts: { minDelayMs?: number; jitterMs?: number } = {}): FakeProvider {
+export function createDemoProvider(opts: { minDelayMs?: number; jitterMs?: number; failureRate?: number } = {}): FakeProvider {
   const min = opts.minDelayMs ?? 400;
   const jitter = opts.jitterMs ?? 1_000;
+  const failureRate = opts.failureRate ?? 0;
   return new FakeProvider(
-    (req) => ({
-      text: reply(req),
-      sources: req.tools?.includes("search")
-        ? [
-            { title: "Example source one", url: "https://example.com/one" },
-            { title: "Example source two", url: "https://example.org/two" },
-          ]
-        : [],
-    }),
+    (req) => {
+      if (failureRate > 0 && !isPlannerPrompt(req) && Math.random() < failureRate) {
+        return new LlmError("demo provider is pretending to be overloaded", { status: 503 });
+      }
+      return {
+        text: reply(req),
+        sources: req.tools?.includes("search")
+          ? [
+              { title: "Example source one", url: "https://example.com/one" },
+              { title: "Example source two", url: "https://example.org/two" },
+            ]
+          : [],
+      };
+    },
     { delayMs: () => min + Math.floor(Math.random() * jitter), model: "demo" },
   );
+}
+
+function isPlannerPrompt(req: LlmRequest): boolean {
+  return [RESEARCH_PLAN_INTRO, GENERAL_PLAN_INTRO, REPLAN_INTRO].some((intro) => req.prompt.startsWith(intro));
 }
 
 function reply(req: LlmRequest): string {
