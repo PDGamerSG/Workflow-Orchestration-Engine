@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { FakeProvider, type FakeHandler } from "../llm/fake";
 import { LlmError } from "../llm/provider";
 import { eventTypes, stepMap } from "../test/helpers";
+import { Planner } from "../planner/planner";
 import { Engine, type EngineOptions } from "./engine";
 import { ConflictError, NotFoundError, ValidationError } from "./errors";
 import { Store } from "./store";
@@ -215,6 +216,76 @@ describe("Engine", () => {
     expect(stepMap(store, runId).a!.status).toBe("running");
     expect(provider.calls).toHaveLength(1);
     expect(store.getRun(runId)!.leaseOwner).toBe("intruder");
+  });
+
+  test("plans a goal run, then executes the planned graph", async () => {
+    const plan = { steps: [{ id: "outline", prompt: "step outline for {{goal}}" }, { id: "draft", prompt: "step draft {{outline.output}}", final: true }] };
+    const provider = new FakeProvider((req, call) => (req.jsonSchema ? { text: JSON.stringify(plan) } : echo(req, call)));
+    const { engine, store } = makeEngine(tempDbPath(), provider, { planner: new Planner(provider, { searchEnabled: false }) });
+    engine.start();
+
+    const { runId } = engine.createRun({ goal: "write a launch post", profile: "general" });
+    expect(store.getRun(runId)!.status).toBe("planning");
+    await engine.whenSettled(runId);
+
+    const run = store.getRun(runId)!;
+    expect(run).toMatchObject({ status: "succeeded", goal: "write a launch post", profile: "general", graphVersion: 1 });
+    expect(provider.callsMatching("step outline")[0]!.prompt).toBe("step outline for write a launch post");
+    expect(stepMap(store, runId).draft!.output).toBe("draft-out");
+    expect(eventTypes(store, runId).slice(0, 2)).toEqual(["run.created", "run.planned"]);
+    // Planning tokens count toward the run total.
+    const stepTokens = store.getSteps(runId).reduce((n, s) => n + s.inputTokens, 0);
+    expect(store.totals(runId).inputTokens).toBeGreaterThan(stepTokens);
+  });
+
+  test("re-plans a failed branch and finishes the run", async () => {
+    const plan = { steps: [{ id: "fragile", prompt: "step fragile" }, { id: "report", prompt: "step report {{fragile.output}}", final: true }] };
+    const fix = { steps: [{ id: "sturdy", prompt: "step sturdy" }] };
+    const provider = new FakeProvider((req, call) => {
+      if (req.jsonSchema) return { text: JSON.stringify(req.prompt.includes("failed after all its retries") ? fix : plan) };
+      if (req.prompt.startsWith("step fragile")) return new LlmError("model refused", { status: 400 });
+      return echo(req, call);
+    });
+    const { engine, store } = makeEngine(tempDbPath(), provider, { planner: new Planner(provider, { searchEnabled: false }) });
+    engine.start();
+
+    const { runId } = engine.createRun({ goal: "a goal that needs a repair" });
+    await engine.whenSettled(runId);
+
+    const run = store.getRun(runId)!;
+    expect(run).toMatchObject({ status: "succeeded", replans: 1, graphVersion: 2 });
+    const steps = stepMap(store, runId);
+    expect(steps.fragile!.status).toBe("superseded");
+    expect(steps.report!.status).toBe("superseded");
+    expect(steps.sturdy!.status).toBe("succeeded");
+    expect(steps.report_r2).toMatchObject({ status: "succeeded", resolvedPrompt: "step report sturdy-out" });
+    const replanned = store.eventsAfter(runId, 0).find((e) => e.type === "run.replanned")!;
+    expect(replanned.payload).toMatchObject({ failedStepId: "fragile", graphVersion: 2, supersede: ["fragile", "report"], added: ["sturdy", "report_r2"] });
+  });
+
+  test("fails the run once re-plans run out", async () => {
+    const plan = { steps: [{ id: "fragile", prompt: "step fragile" }] };
+    const provider = new FakeProvider((req) => (req.jsonSchema ? { text: JSON.stringify(plan) } : new LlmError("no", { status: 400 })));
+    const { engine, store } = makeEngine(tempDbPath(), provider, { planner: new Planner(provider, { searchEnabled: false }) });
+    engine.start();
+
+    const { runId } = engine.createRun({ goal: "never works", maxReplans: 0 });
+    await engine.whenSettled(runId);
+    expect(store.getRun(runId)).toMatchObject({ status: "failed", replans: 0 });
+  });
+
+  test("marks the run failed when planning never produces a valid graph", async () => {
+    const provider = new FakeProvider(() => ({ text: "not json" }));
+    const { engine, store } = makeEngine(tempDbPath(), provider, { planner: new Planner(provider, { searchEnabled: false }) });
+    engine.start();
+
+    const { runId } = engine.createRun({ goal: "unplannable" });
+    await engine.whenSettled(runId);
+
+    expect(store.getRun(runId)).toMatchObject({ status: "failed", error: "planning failed: no valid plan after 3 attempts", graph: null });
+    const failed = store.eventsAfter(runId, 0).find((e) => e.type === "run.failed")!;
+    expect(failed.payload).toMatchObject({ issues: ["the reply was not valid JSON"] });
+    expect(store.totals(runId).inputTokens).toBeGreaterThan(0);
   });
 
   test("goal runs need a planner", () => {

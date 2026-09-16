@@ -8,6 +8,7 @@ describe("loadConfig", () => {
       googleApiKey: "k",
       model: "gemini-3.5-flash",
       rpm: 60,
+      searchEnabled: true,
       databasePath: "data/relay.db",
       port: 4000,
       webOrigin: "http://localhost:3000",
@@ -16,8 +17,8 @@ describe("loadConfig", () => {
   });
 
   test("parses overrides and treats empty values as unset", () => {
-    const config = loadConfig({ LLM_PROVIDER: "demo", PORT: "5050", GEMINI_RPM: "", PRICE_OUTPUT_PER_M: "2.5" });
-    expect(config).toMatchObject({ provider: "demo", port: 5050, rpm: 60, pricing: { outputPerM: 2.5 } });
+    const config = loadConfig({ LLM_PROVIDER: "demo", PORT: "5050", GEMINI_RPM: "", PRICE_OUTPUT_PER_M: "2.5", SEARCH_ENABLED: "false" });
+    expect(config).toMatchObject({ provider: "demo", port: 5050, rpm: 60, searchEnabled: false, pricing: { outputPerM: 2.5 } });
   });
 
   test("requires an API key for gemini", () => {

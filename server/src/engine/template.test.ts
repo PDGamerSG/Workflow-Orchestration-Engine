@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { extractRefs, renderTemplate, TemplateError, type TemplateContext } from "./template";
+import { extractRefs, renameRefs, renderTemplate, TemplateError, type TemplateContext } from "./template";
 
 function ctx(steps: Record<string, { output: string; sources?: { title: string; url: string }[] }>, goal: string | null = null): TemplateContext {
   return {
@@ -47,6 +47,15 @@ describe("renderTemplate", () => {
 
   test("leaves unrelated braces alone", () => {
     expect(renderTemplate('JSON like {"a": 1} and {{not a ref}}', ctx({}))).toBe('JSON like {"a": 1} and {{not a ref}}');
+  });
+});
+
+describe("renameRefs", () => {
+  test("renames ids in every reference form and nothing else", () => {
+    const renames = new Map([["b", "b_alt"]]);
+    expect(renameRefs("b said {{b.output}}, {{ b.output.x[0] }}, {{b.sources}}, {{bb.output}}, {{b}}", renames)).toBe(
+      "b said {{b_alt.output}}, {{ b_alt.output.x[0] }}, {{b_alt.sources}}, {{bb.output}}, {{b_alt}}",
+    );
   });
 });
 

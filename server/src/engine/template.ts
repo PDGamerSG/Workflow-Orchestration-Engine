@@ -23,6 +23,14 @@ export function extractRefs(prompt: string): string[] {
   return [...ids];
 }
 
+/** Rewrites step ids inside template references, leaving the rest of each reference as it was. */
+export function renameRefs(prompt: string, renames: Map<string, string>): string {
+  return prompt.replace(REF, (whole, id: string) => {
+    const next = renames.get(id);
+    return next ? whole.replace(id, next) : whole;
+  });
+}
+
 export function renderTemplate(prompt: string, ctx: TemplateContext): string {
   return prompt.replace(REF, (_whole, id: string, field: string | undefined, path: string | undefined) => {
     if (id === GOAL_REF && !field) return ctx.goal ?? "";
