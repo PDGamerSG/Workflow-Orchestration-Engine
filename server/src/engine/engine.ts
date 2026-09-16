@@ -205,6 +205,16 @@ export class Engine {
     if (this.store.claimRun(runId, this.workerId, this.clock.now(), this.leaseTtlMs)) this.launch(runId, null);
   }
 
+  /** Removes a finished run and everything it wrote. An unfinished run has to be cancelled first. */
+  delete(runId: string): void {
+    const run = this.store.getRun(runId);
+    if (!run) throw new NotFoundError(`run ${runId} not found`);
+    if (!TERMINAL_RUN_STATUSES.includes(run.status)) {
+      throw new ConflictError(`run ${runId} is ${run.status}, cancel it before deleting`);
+    }
+    this.store.deleteRun(runId);
+  }
+
   /** Resolves when this process is no longer driving the run. */
   whenSettled(runId: string): Promise<void> {
     return this.active.get(runId)?.done ?? Promise.resolve();
