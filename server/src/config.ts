@@ -8,6 +8,7 @@ const EnvSchema = z
     GEMINI_MODEL: z.string().default("gemini-3.5-flash"),
     GEMINI_RPM: z.coerce.number().int().positive().default(60),
     SEARCH_ENABLED: z.enum(["true", "false"]).default("true"),
+    LEASE_TTL_MS: z.coerce.number().int().min(1_000).default(30_000),
     DATABASE_PATH: z.string().default("data/relay.db"),
     PORT: z.coerce.number().int().min(0).max(65_535).default(4000),
     WEB_ORIGIN: z.string().default("http://localhost:3000"),
@@ -25,6 +26,7 @@ export type Config = {
   model: string;
   rpm: number;
   searchEnabled: boolean;
+  leaseTtlMs: number;
   databasePath: string;
   port: number;
   webOrigin: string;
@@ -45,6 +47,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     model: e.GEMINI_MODEL,
     rpm: e.GEMINI_RPM,
     searchEnabled: e.SEARCH_ENABLED === "true",
+    leaseTtlMs: e.LEASE_TTL_MS,
     databasePath: e.DATABASE_PATH,
     port: e.PORT,
     webOrigin: e.WEB_ORIGIN,

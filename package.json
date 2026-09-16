@@ -9,6 +9,8 @@
   "scripts": {
     "dev": "bun --filter '*' dev",
     "test": "bun --filter '*' test",
-    "typecheck": "bun --filter '*' typecheck"
+    "typecheck": "bun --filter '*' typecheck",
+    "bench": "bun --filter '@relay/server' bench",
+    "demo:crash": "bun --filter '@relay/server' demo:crash"
   }
 }
