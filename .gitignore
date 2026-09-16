@@ -42,3 +42,6 @@ data
 # next.js
 .next
 next-env.d.ts
+
+# browser automation scratch output
+.playwright-mcp
