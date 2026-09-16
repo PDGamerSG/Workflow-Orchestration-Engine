@@ -163,7 +163,7 @@ docs/design.md        the design this was built from
 ## Tests
 
 ```bash
-bun run test      # 149 tests: engine, planner, API, dashboard reducer and selection
+bun run test      # 157 tests: engine, planner, API, dashboard reducer and selection
 bun run typecheck
 ```
 
