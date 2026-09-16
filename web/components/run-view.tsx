@@ -6,7 +6,7 @@ import { useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api, ApiError } from "@/lib/api";
-import { formatCost, formatDuration, formatTokens, tryPrettyJson } from "@/lib/format";
+import { formatCost, formatDuration, formatTokens, tryPrettyJson, webUrl } from "@/lib/format";
 import { layoutGraph } from "@/lib/layout";
 import { currentSteps, supersededSteps } from "@/lib/run-reducer";
 import { autoSelectStep, finalStepId, runSources } from "@/lib/select";
@@ -15,6 +15,7 @@ import { ConfirmButton } from "./confirm-button";
 import { CopyButton, DownloadButton } from "./copy-button";
 import { Lamp, Status, statusWord } from "./lamp";
 import { RunGraph } from "./run-graph";
+import { SourceList } from "./source-list";
 import { StepPanel } from "./step-panel";
 import { Timeline } from "./timeline";
 
@@ -246,16 +247,7 @@ export function RunView({ runId }: { runId: string }) {
               {sources.length > 0 && (
                 <section style={{ marginTop: 24, borderTop: "1px solid var(--rule)", paddingTop: 16 }}>
                   <h3 style={{ fontWeight: 700, fontSize: 14, marginBottom: 8 }}>Sources this run used</h3>
-                  <ol style={{ listStyle: "decimal", paddingLeft: 20, fontSize: 14 }}>
-                    {sources.map((source) => (
-                      <li key={source.url} style={{ marginBottom: 4 }}>
-                        <a href={source.url} target="_blank" rel="noreferrer" style={{ textUnderlineOffset: 2 }}>
-                          {source.title}
-                        </a>{" "}
-                        <span className="hint">{source.steps.join(", ")}</span>
-                      </li>
-                    ))}
-                  </ol>
+                  <SourceList sources={sources} fontSize={14} />
                 </section>
               )}
             </>
@@ -284,10 +276,13 @@ function writeStepParam(stepId: string | null): void {
   window.history.replaceState(null, "", url);
 }
 
-/** The report as a file: the goal as a heading, the answer, then the citations. */
+/** The report as a file: the goal as a heading, the answer, then the sources the run used. */
 function reportMarkdown(goal: string | null, output: string, sources: { title: string; url: string }[]): string {
   const head = goal ? `# ${goal}\n\n` : "";
-  const cited = sources.length > 0 ? `\n\n## Sources\n\n${sources.map((s, i) => `${i + 1}. [${s.title}](${s.url})`).join("\n")}\n` : "";
+  // Only real web links become markdown links, the same rule the page applies.
+  const linkable = sources.filter((s) => webUrl(s.url));
+  const list = linkable.map((s, i) => `${i + 1}. [${s.title}](${s.url})`).join("\n");
+  const cited = linkable.length > 0 ? `\n\n## Sources this run used\n\n${list}\n` : "";
   return `${head}${output.trim()}${cited}`;
 }
 

@@ -163,7 +163,7 @@ docs/design.md        the design this was built from
 ## Tests
 
 ```bash
-bun run test      # 140 tests: engine, planner, API, dashboard reducer and selection
+bun run test      # 149 tests: engine, planner, API, dashboard reducer and selection
 bun run typecheck
 ```
 
@@ -184,4 +184,4 @@ The engine tests run two `Engine` instances against one database file to cover l
 - One model provider. Anything else needs an `LlmProvider` implementation.
 - Steps are model calls. There are no HTTP or code steps.
 - Several processes can share one machine's database file, not several machines.
-- No auth. The dashboard and API are meant to run locally.
+- No auth. The dashboard and API are meant to run locally, on a trusted machine.

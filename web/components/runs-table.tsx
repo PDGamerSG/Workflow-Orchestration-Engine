@@ -21,6 +21,9 @@ const BAR_ORDER: { status: StepStatus; color: string }[] = [
 export function RunsTable() {
   const [runs, setRuns] = useState<RunSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Kept apart from `error`: the poll below clears its own error every three seconds,
+  // which would wipe a failed delete before it could be read.
+  const [actionError, setActionError] = useState<string | null>(null);
   const [filter, setFilter] = useState<RunFilter>("all");
   const [query, setQuery] = useState("");
   const [deleting, setDeleting] = useState<string | null>(null);
@@ -50,13 +53,15 @@ export function RunsTable() {
 
   async function remove(run: RunSummary) {
     setDeleting(run.id);
-    // Drop the row at once; the poll below confirms it.
+    setActionError(null);
+    // Drop the row at once; the poll above confirms it.
     setRuns((current) => current?.filter((r) => r.id !== run.id) ?? null);
     try {
       await api.deleteRun(run.id);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not delete the run.");
-      setRuns(await api.listRuns().catch(() => runs));
+      setActionError(err instanceof ApiError ? err.message : "Could not delete the run.");
+      // The row is still there on the engine, so put the list back the way the engine has it.
+      await api.listRuns().then(setRuns, () => {});
     } finally {
       setDeleting(null);
     }
@@ -89,6 +94,11 @@ export function RunsTable() {
       </div>
 
       {error && <p className="error-box">{error}</p>}
+      {actionError && (
+        <p className="error-box" role="alert" style={{ marginBottom: 12 }}>
+          {actionError}
+        </p>
+      )}
       {runs?.length === 0 && <p className="hint">No runs yet. Describe a goal above to start the first one.</p>}
       {runs && runs.length > 0 && shown.length === 0 && (
         <p className="hint">
