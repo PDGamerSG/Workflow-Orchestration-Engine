@@ -1,6 +1,6 @@
 "use client";
 
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useState, type FormEvent } from "react";
 import { api, ApiError } from "@/lib/api";
 import type { CreateRunRequest, Profile } from "@/lib/types";
@@ -21,6 +21,12 @@ const EXAMPLE_GRAPH = JSON.stringify(
   2,
 );
 
+const EXAMPLE_GOALS = [
+  "Should a two-person SaaS startup use SQLite or Postgres as its primary database?",
+  "What changed in the EU AI Act timeline this year, and who does each phase affect?",
+  "Compare Bun, Node and Deno for a CLI shipped to non-technical users.",
+];
+
 const PROFILES: { value: Profile; title: string; detail: string }[] = [
   { value: "research", title: "Research report", detail: "Parallel researchers, a fact check, and a cited report." },
   { value: "general", title: "Planned workflow", detail: "The planner designs the steps for any goal." },
@@ -28,9 +34,11 @@ const PROFILES: { value: Profile; title: string; detail: string }[] = [
 
 export function NewRunForm() {
   const router = useRouter();
+  // "Run again" links here with the old goal, so it can be edited before it starts.
+  const params = useSearchParams();
   const [mode, setMode] = useState<"goal" | "graph">("goal");
-  const [goal, setGoal] = useState("");
-  const [profile, setProfile] = useState<Profile>("research");
+  const [goal, setGoal] = useState(() => params.get("goal") ?? "");
+  const [profile, setProfile] = useState<Profile>(() => (params.get("profile") === "general" ? "general" : "research"));
   const [graph, setGraph] = useState(EXAMPLE_GRAPH);
   const [concurrency, setConcurrency] = useState(4);
   const [maxReplans, setMaxReplans] = useState(2);
@@ -107,8 +115,23 @@ export function NewRunForm() {
             placeholder="Should a two-person SaaS startup use SQLite or Postgres as its primary database?"
             value={goal}
             onChange={(e) => setGoal(e.target.value)}
+            onKeyDown={(e) => {
+              // Ctrl+Enter starts the run without reaching for the mouse.
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) e.currentTarget.form?.requestSubmit();
+            }}
             style={{ fontSize: 17 }}
           />
+
+          <div className="flex flex-wrap items-center gap-2" style={{ marginTop: 10 }}>
+            <span className="hint">Try</span>
+            {EXAMPLE_GOALS.map((example) => (
+              <button key={example} type="button" className="chip" onClick={() => setGoal(example)} title={example}>
+                <span className="line-clamp-1" style={{ maxWidth: 260 }}>
+                  {example}
+                </span>
+              </button>
+            ))}
+          </div>
 
           <fieldset style={{ marginTop: 18 }}>
             <legend className="field-label">Workflow</legend>
@@ -155,7 +178,7 @@ export function NewRunForm() {
           </label>
           <input id="budget" className="input" type="number" min="0.01" step="0.01" placeholder="No limit" value={budgetUsd} onChange={(e) => setBudgetUsd(e.target.value)} style={{ width: 130 }} />
         </div>
-        <button type="submit" className="button" disabled={submitting} style={{ marginLeft: "auto" }}>
+        <button type="submit" className="button" disabled={submitting} style={{ marginLeft: "auto" }} title="Ctrl+Enter from the goal box">
           {submitting ? "Starting" : "Start run"}
         </button>
       </div>

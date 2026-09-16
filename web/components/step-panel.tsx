@@ -4,11 +4,28 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { formatCost, formatDuration, formatTokens, tryPrettyJson } from "@/lib/format";
 import type { Step, StepDef } from "@/lib/types";
+import { CopyButton } from "./copy-button";
 import { Status } from "./lamp";
 
-export function StepPanel({ def, step, now }: { def: StepDef | undefined; step: Step | undefined; now: number }) {
+export function StepPanel({
+  def,
+  step,
+  now,
+  following,
+  onFollow,
+}: {
+  def: StepDef | undefined;
+  step: Step | undefined;
+  now: number;
+  following: boolean;
+  onFollow: () => void;
+}) {
   if (!step) {
-    return <p className="hint" style={{ padding: 20 }}>Select a step in the graph to see its prompt, output and cost.</p>;
+    return (
+      <p className="hint" style={{ padding: 20 }}>
+        Select a step in the graph to see its prompt, output and cost.
+      </p>
+    );
   }
 
   const elapsed = step.startedAt ? (step.finishedAt ?? now) - step.startedAt : null;
@@ -16,11 +33,24 @@ export function StepPanel({ def, step, now }: { def: StepDef | undefined; step: 
 
   return (
     <div style={{ padding: 20 }}>
-      <h2 className="mono break-all" style={{ fontSize: 16, fontWeight: 700 }}>
-        {step.stepId}
-      </h2>
-      <div style={{ marginTop: 6 }}>
-        <Status state={step.status} />
+      <div className="flex items-start justify-between gap-3">
+        <div style={{ minWidth: 0 }}>
+          <h2 className="mono break-all" style={{ fontSize: 16, fontWeight: 700 }}>
+            {step.stepId}
+          </h2>
+          <div style={{ marginTop: 6 }}>
+            <Status state={step.status} />
+          </div>
+        </div>
+        {following ? (
+          <span className="hint" style={{ whiteSpace: "nowrap" }} title="The panel moves to whatever step matters right now">
+            Following run
+          </span>
+        ) : (
+          <button className="button" data-variant="quiet" data-size="small" onClick={onFollow} title="Go back to following the run">
+            Follow run
+          </button>
+        )}
       </div>
 
       <dl className="grid grid-cols-3 gap-x-3 gap-y-3" style={{ marginTop: 16, fontSize: 13 }}>
@@ -45,13 +75,16 @@ export function StepPanel({ def, step, now }: { def: StepDef | undefined; step: 
       )}
 
       {step.error && (
-        <div className={step.status === "failed" ? "error-box" : "hint"} style={{ marginTop: 16, borderLeft: step.status === "failed" ? undefined : "3px solid var(--caution)", paddingLeft: 10 }}>
+        <div
+          className={step.status === "failed" ? "error-box" : "hint"}
+          style={{ marginTop: 16, borderLeft: step.status === "failed" ? undefined : "3px solid var(--caution)", paddingLeft: 10 }}
+        >
           {step.status === "running" ? "Last attempt failed, retrying: " : ""}
           {step.error}
         </div>
       )}
 
-      <Section title="Output">
+      <Section title="Output" action={step.output ? <CopyButton small text={step.output} /> : undefined}>
         {step.output === null ? (
           <p className="hint">{step.status === "running" ? "Waiting for the model." : "No output."}</p>
         ) : json ? (
@@ -97,10 +130,13 @@ function Stat({ label, value }: { label: string; value: string }) {
   );
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function Section({ title, action, children }: { title: string; action?: React.ReactNode; children: React.ReactNode }) {
   return (
     <section style={{ marginTop: 20 }}>
-      <h3 style={{ fontWeight: 700, fontSize: 14, marginBottom: 8 }}>{title}</h3>
+      <div className="flex items-center justify-between gap-3" style={{ marginBottom: 8 }}>
+        <h3 style={{ fontWeight: 700, fontSize: 14 }}>{title}</h3>
+        {action}
+      </div>
       {children}
     </section>
   );

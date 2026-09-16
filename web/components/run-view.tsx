@@ -1,22 +1,29 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api, ApiError } from "@/lib/api";
 import { formatCost, formatDuration, formatTokens, tryPrettyJson } from "@/lib/format";
 import { layoutGraph } from "@/lib/layout";
 import { currentSteps, supersededSteps } from "@/lib/run-reducer";
+import { autoSelectStep, finalStepId } from "@/lib/select";
 import { useNow, useRun } from "@/lib/use-run";
+import { CopyButton, DownloadButton } from "./copy-button";
 import { Lamp, Status, statusWord } from "./lamp";
 import { RunGraph } from "./run-graph";
 import { StepPanel } from "./step-panel";
 import { Timeline } from "./timeline";
 
 export function RunView({ runId }: { runId: string }) {
+  const router = useRouter();
   const { state, error, connection } = useRun(runId);
-  const [selected, setSelected] = useState<string | null>(null);
+  // null means "follow the run": the panel shows whatever step matters right now.
+  // A link can point at one step instead, so ?step= seeds the choice.
+  const stepParam = useSearchParams().get("step");
+  const [pinned, setPinned] = useState<string | null>(stepParam);
   const [tab, setTab] = useState<"report" | "timeline">("report");
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -30,6 +37,27 @@ export function RunView({ runId }: { runId: string }) {
   const graphShape = state?.run.graph ?? null;
   const layout = useMemo(() => (graphShape ? layoutGraph(graphShape) : null), [graphShape]);
 
+  const followed = state ? autoSelectStep(state) : null;
+  const selectedId = (pinned && state?.steps[pinned] ? pinned : followed) ?? null;
+
+  // Picking a step writes it to the address bar, so the link points at what is being discussed.
+  function pick(stepId: string | null) {
+    setPinned(stepId);
+    writeStepParam(stepId);
+  }
+
+  const done = steps.filter((s) => s.status === "succeeded").length;
+
+  // A background tab shows how far the run has got.
+  useEffect(() => {
+    if (!state) return;
+    const label = state.run.goal ?? state.run.id;
+    document.title = active && steps.length > 0 ? `${done}/${steps.length} · ${label}` : `${statusWord(state.run.status)} · ${label}`;
+    return () => {
+      document.title = "Relay";
+    };
+  }, [state, active, done, steps.length]);
+
   if (error) {
     return (
       <div className="error-box" role="alert">
@@ -41,19 +69,27 @@ export function RunView({ runId }: { runId: string }) {
 
   const { run } = state;
   const graph = run.graph;
-  const finalDef = graph?.steps.find((s) => s.final) ?? (graph ? graph.steps.find((s) => s.id === graph.order.at(-1)) : undefined);
-  const finalStep = finalDef ? state.steps[finalDef.id] : undefined;
-  const selectedId = selected && state.steps[selected] ? selected : null;
-  const done = steps.filter((s) => s.status === "succeeded").length;
+  const finalId = finalStepId(graph);
+  const finalDef = graph?.steps.find((s) => s.id === finalId);
+  const finalStep = finalId ? state.steps[finalId] : undefined;
   const elapsed = (active ? now : run.updatedAt) - run.createdAt;
   // Size the diagram to the laid-out graph instead of leaving a tall empty panel.
   const panelHeight = layout ? Math.min(640, Math.max(300, layout.height + 90)) : 320;
+  const report = finalStep?.output ?? null;
+  const reportJson = report ? tryPrettyJson(report) : null;
 
-  async function act(action: "cancel" | "retry") {
+  async function act(action: "cancel" | "retry" | "delete") {
+    if (action === "delete" && !confirm("Delete this run and everything it recorded?")) return;
     setBusy(true);
     setActionError(null);
     try {
-      await (action === "cancel" ? api.cancelRun(runId) : api.retryRun(runId));
+      if (action === "cancel") await api.cancelRun(runId);
+      else if (action === "retry") await api.retryRun(runId);
+      else {
+        await api.deleteRun(runId);
+        router.push("/");
+        return;
+      }
     } catch (err) {
       setActionError(err instanceof ApiError ? err.message : "The request failed.");
     } finally {
@@ -75,7 +111,7 @@ export function RunView({ runId }: { runId: string }) {
             {run.id}
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           {active && (
             <button className="button" data-variant="danger" disabled={busy} onClick={() => act("cancel")}>
               Cancel run
@@ -84,6 +120,16 @@ export function RunView({ runId }: { runId: string }) {
           {run.status === "failed" && (
             <button className="button" disabled={busy} onClick={() => act("retry")}>
               Retry failed steps
+            </button>
+          )}
+          {run.goal && (
+            <Link className="button" data-variant="quiet" href={`/?goal=${encodeURIComponent(run.goal)}&profile=${run.profile ?? "research"}`}>
+              Run again
+            </Link>
+          )}
+          {!active && (
+            <button className="button" data-variant="quiet" disabled={busy} onClick={() => act("delete")}>
+              Delete
             </button>
           )}
         </div>
@@ -122,7 +168,7 @@ export function RunView({ runId }: { runId: string }) {
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_380px]" style={{ marginTop: 20 }}>
         <div className="panel overflow-hidden" style={{ height: panelHeight }}>
           {graph ? (
-            <RunGraph graph={graph} layout={layout!} graphVersion={run.graphVersion} steps={state.steps} selectedId={selectedId} onSelect={setSelected} now={now} />
+            <RunGraph graph={graph} layout={layout!} graphVersion={run.graphVersion} steps={state.steps} selectedId={selectedId} onSelect={pick} now={now} />
           ) : (
             <div className="flex h-full flex-col items-center justify-center gap-3" style={{ color: "var(--ink-2)" }}>
               <Lamp state={run.status === "planning" ? "planning" : run.status} size="large" />
@@ -131,14 +177,24 @@ export function RunView({ runId }: { runId: string }) {
           )}
         </div>
         <aside className="panel overflow-y-auto" style={{ maxHeight: Math.max(panelHeight, 480) }}>
-          <StepPanel def={graph?.steps.find((s) => s.id === selectedId)} step={selectedId ? state.steps[selectedId] : undefined} now={now} />
+          <StepPanel
+            def={graph?.steps.find((s) => s.id === selectedId)}
+            step={selectedId ? state.steps[selectedId] : undefined}
+            now={now}
+            following={!pinned && !!selectedId}
+            onFollow={() => pick(null)}
+          />
           {replaced.length > 0 && (
             <div style={{ padding: "0 20px 20px" }}>
               <h3 style={{ fontWeight: 700, fontSize: 14, marginBottom: 6 }}>Replaced by re-planning</h3>
               <ul className="flex flex-wrap gap-2">
                 {replaced.map((s) => (
                   <li key={s.stepId}>
-                    <button className="mono inline-flex items-center gap-2" onClick={() => setSelected(s.stepId)} style={{ fontSize: 13, padding: "2px 8px", border: "1px dashed var(--rule-strong)", borderRadius: "var(--radius-s)" }}>
+                    <button
+                      className="mono inline-flex items-center gap-2"
+                      onClick={() => pick(s.stepId)}
+                      style={{ fontSize: 13, padding: "2px 8px", border: "1px dashed var(--rule-strong)", borderRadius: "var(--radius-s)" }}
+                    >
                       <Lamp state="superseded" />
                       {s.stepId}
                     </button>
@@ -151,30 +207,54 @@ export function RunView({ runId }: { runId: string }) {
       </div>
 
       <section className="panel" style={{ marginTop: 16 }}>
-        <div role="tablist" className="flex gap-6" style={{ padding: "0 20px", borderBottom: "1px solid var(--rule)" }}>
-          {(["report", "timeline"] as const).map((t) => (
-            <button
-              key={t}
-              role="tab"
-              aria-selected={tab === t}
-              onClick={() => setTab(t)}
-              style={{ padding: "12px 0", fontWeight: 700, fontSize: 14, color: tab === t ? "var(--ink)" : "var(--ink-3)", borderBottom: `2px solid ${tab === t ? "var(--ink)" : "transparent"}`, marginBottom: -1 }}
-            >
-              {t === "report" ? "Result" : `Timeline (${state.events.length})`}
-            </button>
-          ))}
+        <div className="flex flex-wrap items-center justify-between gap-3" style={{ padding: "0 20px", borderBottom: "1px solid var(--rule)" }}>
+          <div role="tablist" className="flex gap-6">
+            {(["report", "timeline"] as const).map((t) => (
+              <button
+                key={t}
+                role="tab"
+                aria-selected={tab === t}
+                onClick={() => setTab(t)}
+                style={{ padding: "12px 0", fontWeight: 700, fontSize: 14, color: tab === t ? "var(--ink)" : "var(--ink-3)", borderBottom: `2px solid ${tab === t ? "var(--ink)" : "transparent"}`, marginBottom: -1 }}
+              >
+                {t === "report" ? "Result" : `Timeline (${state.events.length})`}
+              </button>
+            ))}
+          </div>
+          {tab === "report" && report && (
+            <div className="flex gap-2" style={{ paddingBottom: 6 }}>
+              <CopyButton small text={report} label="Copy result" />
+              <DownloadButton small text={reportMarkdown(run.goal, report, finalStep?.sources ?? [])} filename={`${run.id}.md`} label="Download .md" />
+            </div>
+          )}
         </div>
         <div style={{ padding: 20 }}>
           {tab === "timeline" ? (
             <Timeline events={state.events} startedAt={run.createdAt} />
-          ) : finalStep?.output ? (
-            tryPrettyJson(finalStep.output) ? (
-              <pre className="code-block">{tryPrettyJson(finalStep.output)}</pre>
-            ) : (
-              <article className="markdown">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{finalStep.output}</ReactMarkdown>
-              </article>
-            )
+          ) : report ? (
+            <>
+              {reportJson ? (
+                <pre className="code-block">{reportJson}</pre>
+              ) : (
+                <article className="markdown">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{report}</ReactMarkdown>
+                </article>
+              )}
+              {finalStep!.sources.length > 0 && (
+                <section style={{ marginTop: 24, borderTop: "1px solid var(--rule)", paddingTop: 16 }}>
+                  <h3 style={{ fontWeight: 700, fontSize: 14, marginBottom: 8 }}>Sources</h3>
+                  <ol style={{ listStyle: "decimal", paddingLeft: 20, fontSize: 14 }}>
+                    {finalStep!.sources.map((s) => (
+                      <li key={s.url} style={{ marginBottom: 4 }}>
+                        <a href={s.url} target="_blank" rel="noreferrer" style={{ textUnderlineOffset: 2 }}>
+                          {s.title}
+                        </a>
+                      </li>
+                    ))}
+                  </ol>
+                </section>
+              )}
+            </>
           ) : (
             <p className="hint">
               {finalDef ? (
@@ -190,6 +270,21 @@ export function RunView({ runId }: { runId: string }) {
       </section>
     </>
   );
+}
+
+/** Keeps ?step= in step with the panel without a navigation. */
+function writeStepParam(stepId: string | null): void {
+  const url = new URL(window.location.href);
+  if (stepId) url.searchParams.set("step", stepId);
+  else url.searchParams.delete("step");
+  window.history.replaceState(null, "", url);
+}
+
+/** The report as a file: the goal as a heading, the answer, then the citations. */
+function reportMarkdown(goal: string | null, output: string, sources: { title: string; url: string }[]): string {
+  const head = goal ? `# ${goal}\n\n` : "";
+  const cited = sources.length > 0 ? `\n\n## Sources\n\n${sources.map((s, i) => `${i + 1}. [${s.title}](${s.url})`).join("\n")}\n` : "";
+  return `${head}${output.trim()}${cited}`;
 }
 
 function HeaderStat({ label, value }: { label: string; value: React.ReactNode }) {
