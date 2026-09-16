@@ -1,8 +1,8 @@
 "use client";
 
-import { Background, Controls, Handle, Position, ReactFlow, type Edge, type Node, type NodeProps } from "@xyflow/react";
+import { Background, Controls, Handle, Position, ReactFlow, ReactFlowProvider, useReactFlow, type Edge, type Node, type NodeProps } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { memo } from "react";
+import { memo, useEffect, useRef } from "react";
 import { formatDuration } from "@/lib/format";
 import { NODE_HEIGHT, NODE_WIDTH, type GraphLayout } from "@/lib/layout";
 import type { Graph, Step, StepDef } from "@/lib/types";
@@ -95,15 +95,45 @@ export function RunGraph(props: {
   );
 
   return (
-    <div style={{ height: "100%" }}>
+    <ReactFlowProvider>
+      <Diagram nodes={nodes} edges={edges} graphVersion={props.graphVersion} onSelect={onSelect} />
+    </ReactFlowProvider>
+  );
+}
+
+const FIT = { padding: 0.15, maxZoom: 1.1 };
+
+function Diagram({ nodes, edges, graphVersion, onSelect }: { nodes: StepFlowNode[]; edges: Edge[]; graphVersion: number; onSelect: (id: string) => void }) {
+  const wrapper = useRef<HTMLDivElement>(null);
+  const { fitView } = useReactFlow();
+
+  // React Flow fits the graph once. Without this a phone-width window, or a window that
+  // changes size, leaves the diagram cropped.
+  useEffect(() => {
+    const element = wrapper.current;
+    if (!element) return;
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => void fitView(FIT));
+    });
+    observer.observe(element);
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
+  }, [fitView]);
+
+  return (
+    <div ref={wrapper} style={{ height: "100%" }}>
       <ReactFlow
-        key={props.graphVersion}
+        key={graphVersion}
         nodes={nodes}
         edges={edges}
         nodeTypes={nodeTypes}
         onNodeClick={(_, node) => onSelect(node.id)}
         fitView
-        fitViewOptions={{ padding: 0.15, maxZoom: 1.1 }}
+        fitViewOptions={FIT}
         minZoom={0.25}
         nodesDraggable={false}
         nodesConnectable={false}

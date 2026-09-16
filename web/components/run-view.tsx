@@ -9,7 +9,7 @@ import { api, ApiError } from "@/lib/api";
 import { formatCost, formatDuration, formatTokens, tryPrettyJson } from "@/lib/format";
 import { layoutGraph } from "@/lib/layout";
 import { currentSteps, supersededSteps } from "@/lib/run-reducer";
-import { autoSelectStep, finalStepId } from "@/lib/select";
+import { autoSelectStep, finalStepId, runSources } from "@/lib/select";
 import { useNow, useRun } from "@/lib/use-run";
 import { CopyButton, DownloadButton } from "./copy-button";
 import { Lamp, Status, statusWord } from "./lamp";
@@ -82,6 +82,8 @@ export function RunView({ runId }: { runId: string }) {
   const panelHeight = layout ? Math.min(640, Math.max(300, layout.height + 90)) : 320;
   const report = finalStep?.output ?? null;
   const reportJson = report ? tryPrettyJson(report) : null;
+  // A report cites what the researchers found, so the list belongs to the run, not one step.
+  const sources = runSources(state);
 
   async function act(action: "cancel" | "retry" | "delete") {
     if (action === "delete" && !confirm("Delete this run and everything it recorded?")) return;
@@ -229,7 +231,7 @@ export function RunView({ runId }: { runId: string }) {
           {tab === "report" && report && (
             <div className="flex gap-2" style={{ paddingBottom: 6 }}>
               <CopyButton small text={report} label="Copy result" />
-              <DownloadButton small text={reportMarkdown(run.goal, report, finalStep?.sources ?? [])} filename={`${run.id}.md`} label="Download .md" />
+              <DownloadButton small text={reportMarkdown(run.goal, report, sources)} filename={`${run.id}.md`} label="Download .md" />
             </div>
           )}
         </div>
@@ -245,15 +247,16 @@ export function RunView({ runId }: { runId: string }) {
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{report}</ReactMarkdown>
                 </article>
               )}
-              {finalStep!.sources.length > 0 && (
+              {sources.length > 0 && (
                 <section style={{ marginTop: 24, borderTop: "1px solid var(--rule)", paddingTop: 16 }}>
-                  <h3 style={{ fontWeight: 700, fontSize: 14, marginBottom: 8 }}>Sources</h3>
+                  <h3 style={{ fontWeight: 700, fontSize: 14, marginBottom: 8 }}>Sources this run used</h3>
                   <ol style={{ listStyle: "decimal", paddingLeft: 20, fontSize: 14 }}>
-                    {finalStep!.sources.map((s) => (
-                      <li key={s.url} style={{ marginBottom: 4 }}>
-                        <a href={s.url} target="_blank" rel="noreferrer" style={{ textUnderlineOffset: 2 }}>
-                          {s.title}
-                        </a>
+                    {sources.map((source) => (
+                      <li key={source.url} style={{ marginBottom: 4 }}>
+                        <a href={source.url} target="_blank" rel="noreferrer" style={{ textUnderlineOffset: 2 }}>
+                          {source.title}
+                        </a>{" "}
+                        <span className="hint">{source.steps.join(", ")}</span>
                       </li>
                     ))}
                   </ol>
