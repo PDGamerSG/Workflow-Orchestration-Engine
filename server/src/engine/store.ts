@@ -318,6 +318,23 @@ export class Store {
     return this.q(sql).run(...params).changes;
   }
 
+  /**
+   * The run, its steps and totals, plus the id of the last event already reflected in them.
+   * One read transaction keeps the rows and the cursor consistent, so a client that streams
+   * events after `lastEventId` sees every later change exactly once.
+   */
+  snapshot(runId: string): { run: RunRow; steps: StepRow[]; totals: Totals; lastEventId: number } | null {
+    this.db.exec("BEGIN DEFERRED");
+    try {
+      const run = this.getRun(runId);
+      if (!run) return null;
+      const { last } = this.q("SELECT COALESCE(MAX(id), 0) AS last FROM events WHERE run_id = ?").get(runId) as { last: number };
+      return { run, steps: this.getSteps(runId), totals: this.totals(runId), lastEventId: last };
+    } finally {
+      this.db.exec("COMMIT");
+    }
+  }
+
   totals(runId: string): Totals {
     const steps = this
       .q(

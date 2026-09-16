@@ -245,6 +245,25 @@ describe("leases", () => {
   });
 });
 
+describe("snapshot", () => {
+  test("returns rows with the id of the last event for the run", () => {
+    newRun();
+    store.installGraph("run_1", chain, 1, [], 2_000);
+    expect(store.snapshot("run_1")!.lastEventId).toBe(0);
+    store.appendEvent("run_1", "run.created", {}, 1);
+    const last = store.appendEvent("run_1", "step.started", { stepId: "a" }, 2);
+    store.appendEvent("run_other", "run.created", {}, 3);
+
+    const snap = store.snapshot("run_1")!;
+    expect(snap.lastEventId).toBe(last);
+    expect(snap.run.id).toBe("run_1");
+    expect(snap.steps).toHaveLength(3);
+    expect(snap.totals.costUsd).toBe(0);
+    expect(store.snapshot("missing")).toBeNull();
+    expect(store.db.inTransaction).toBe(false);
+  });
+});
+
 describe("events and cache", () => {
   test("events come back in id order after a cursor", () => {
     newRun();

@@ -263,7 +263,7 @@ export class RunScheduler {
     const now = this.deps.clock.now();
     this.write(
       () => this.patchStep(id, { status: "running", attempt, resolvedPrompt: prompt, error: null, startedAt: now, finishedAt: null }),
-      [["step.started", { stepId: id, attempt, startedAt: now }]],
+      [["step.started", { stepId: id, attempt, startedAt: now, prompt }]],
     );
   }
 
