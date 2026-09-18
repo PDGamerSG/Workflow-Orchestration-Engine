@@ -1,0 +1,328 @@
+@import "tailwindcss";
+
+/*
+ * Relay draws runs the way a signal box draws track: graphite lines on pale vellum,
+ * with lamp colors for state. Amber is running, green is done, red is stopped, and an unlit lamp is waiting.
+ */
+:root {
+  --bg: #eef1f0;
+  --panel: #f8faf9;
+  --panel-sunk: #e4e9e7;
+  --ink: #1e2a2b;
+  --ink-2: #4f5e5f;
+  --ink-3: #75807f;
+  --rule: #c9d2d0;
+  --rule-strong: #9facaa;
+
+  --go: #1f8a5b;
+  --caution: #d08a1a;
+  --stop: #c23b32;
+  --off: #9aa5a3;
+  --go-soft: #dcefe5;
+  --caution-soft: #f6e7cc;
+  --stop-soft: #f5dad7;
+
+  --radius-s: 3px;
+  --radius-m: 6px;
+  --shadow-node: 0 1px 0 var(--rule);
+
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #172122;
+    --panel: #1e2a2b;
+    --panel-sunk: #142021;
+    --ink: #e3e9e8;
+    --ink-2: #a9b6b5;
+    --ink-3: #7d8b8a;
+    --rule: #34403f;
+    --rule-strong: #52605f;
+
+    --go: #3fb07e;
+    --caution: #e7a33b;
+    --stop: #e0655b;
+    --off: #66726f;
+    --go-soft: #1f3a2f;
+    --caution-soft: #3d311b;
+    --stop-soft: #3f2322;
+
+    color-scheme: dark;
+  }
+}
+
+html {
+  background: var(--bg);
+  color: var(--ink);
+}
+
+body {
+  font-family: var(--font-sans), system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "tnum" 1;
+}
+
+code,
+pre,
+.mono {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-feature-settings: normal;
+}
+
+:focus-visible {
+  outline: 2px solid var(--caution);
+  outline-offset: 2px;
+}
+
+a {
+  color: inherit;
+}
+
+/* Lamps */
+
+.lamp {
+  display: inline-block;
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid var(--off);
+  background: transparent;
+}
+.lamp[data-state="running"],
+.lamp[data-state="planning"] {
+  border-color: var(--caution);
+  background: var(--caution);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--caution) 55%, transparent);
+  animation: lamp-pulse 1.6s ease-out infinite;
+}
+.lamp[data-state="succeeded"] {
+  border-color: var(--go);
+  background: var(--go);
+}
+.lamp[data-state="failed"] {
+  border-color: var(--stop);
+  background: var(--stop);
+}
+.lamp[data-state="cancelled"] {
+  border-color: var(--stop);
+}
+.lamp[data-state="skipped"],
+.lamp[data-state="superseded"] {
+  border-style: dashed;
+}
+.lamp[data-size="large"] {
+  width: 14px;
+  height: 14px;
+}
+
+@keyframes lamp-pulse {
+  to {
+    box-shadow: 0 0 0 7px color-mix(in srgb, var(--caution) 0%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lamp[data-state="running"],
+  .lamp[data-state="planning"] {
+    animation: none;
+  }
+}
+
+/* Shared pieces */
+
+.shell {
+  max-width: 1360px;
+  margin: 0 auto;
+  padding: 0 24px 64px;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 0;
+  border-bottom: 1px solid var(--rule);
+  margin-bottom: 32px;
+}
+
+.wordmark {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 10px;
+  font-weight: 800;
+  font-size: 22px;
+  letter-spacing: -0.02em;
+  text-decoration: none;
+}
+
+.wordmark small {
+  font-weight: 400;
+  font-size: 14px;
+  letter-spacing: 0;
+  color: var(--ink-3);
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-m);
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 16px;
+  border-radius: var(--radius-s);
+  border: 1px solid var(--ink);
+  background: var(--ink);
+  color: var(--bg);
+  font-weight: 700;
+  font-size: 14px;
+  cursor: pointer;
+}
+.button:disabled {
+  opacity: 0.55;
+  cursor: progress;
+}
+.button[data-variant="quiet"] {
+  background: transparent;
+  color: var(--ink);
+  border-color: var(--rule-strong);
+}
+.button[data-variant="danger"] {
+  background: transparent;
+  color: var(--stop);
+  border-color: var(--stop);
+}
+
+.field-label {
+  display: block;
+  font-weight: 700;
+  font-size: 14px;
+  margin-bottom: 6px;
+}
+
+.input,
+.textarea {
+  width: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-s);
+  padding: 8px 10px;
+  font: inherit;
+}
+.textarea {
+  resize: vertical;
+  line-height: 1.45;
+}
+.input:focus,
+.textarea:focus {
+  outline: none;
+  border-color: var(--ink);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--caution) 35%, transparent);
+}
+
+.hint {
+  color: var(--ink-3);
+  font-size: 13px;
+}
+
+.error-box {
+  border-left: 3px solid var(--stop);
+  background: var(--stop-soft);
+  padding: 10px 12px;
+  border-radius: var(--radius-s);
+  font-size: 14px;
+}
+
+.markdown {
+  line-height: 1.65;
+  max-width: 76ch;
+}
+.markdown h1,
+.markdown h2,
+.markdown h3 {
+  font-weight: 800;
+  line-height: 1.25;
+  margin: 1.4em 0 0.5em;
+}
+.markdown h1 {
+  font-size: 24px;
+}
+.markdown h2 {
+  font-size: 19px;
+}
+.markdown h3 {
+  font-size: 16px;
+}
+.markdown p,
+.markdown ul,
+.markdown ol,
+.markdown table {
+  margin: 0 0 0.9em;
+}
+.markdown ul {
+  list-style: disc;
+  padding-left: 1.3em;
+}
+.markdown ol {
+  list-style: decimal;
+  padding-left: 1.3em;
+}
+.markdown a {
+  text-decoration-color: var(--rule-strong);
+  text-underline-offset: 2px;
+}
+.markdown code {
+  background: var(--panel-sunk);
+  padding: 0.1em 0.3em;
+  border-radius: var(--radius-s);
+  font-size: 0.9em;
+}
+.markdown table {
+  border-collapse: collapse;
+  display: block;
+  overflow-x: auto;
+}
+.markdown th,
+.markdown td {
+  border: 1px solid var(--rule);
+  padding: 4px 8px;
+  text-align: left;
+}
+
+.code-block {
+  background: var(--panel-sunk);
+  border-radius: var(--radius-s);
+  padding: 10px 12px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+}
+
+/* React Flow, restyled as a track diagram */
+
+.react-flow {
+  --xy-background-color: var(--panel);
+  --xy-edge-stroke: var(--rule-strong);
+  --xy-edge-stroke-width: 2;
+  --xy-controls-button-background-color: var(--panel);
+  --xy-controls-button-background-color-hover: var(--panel-sunk);
+  --xy-controls-button-color: var(--ink);
+  --xy-controls-button-border-color: var(--rule);
+  --xy-attribution-background-color: transparent;
+}
+.react-flow__attribution a {
+  color: var(--ink-3);
+}
