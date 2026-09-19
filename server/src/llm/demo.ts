@@ -49,7 +49,12 @@ function reply(req: LlmRequest): string {
   }
   if (req.jsonSchema) return JSON.stringify(sampleFromSchema(req.jsonSchema));
 
-  const topic = req.prompt.split("\n").find((line) => line.trim())!.slice(0, 120);
+  const topic = req.prompt
+    .split("\n")
+    .find((line) => line.trim())!
+    .replace(/[#>*`]/g, "")
+    .trim()
+    .slice(0, 120);
   return `## Demo answer\n\nPlaceholder output from the demo provider for:\n\n> ${topic}\n\n- First point [1]\n- Second point [2]`;
 }
 
