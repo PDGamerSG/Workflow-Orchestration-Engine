@@ -147,6 +147,31 @@ describe("HTTP API", () => {
     expect(store.getRun(runId)!.status).toBe("cancelled");
   });
 
+  test("deletes a finished run and everything it wrote", async () => {
+    const { runId } = (await (await post("/runs", { graph })).json()) as { runId: string };
+    await engine.whenSettled(runId);
+
+    const del = await fetch(`${base}/runs/${runId}`, { method: "DELETE" });
+    expect(del.status).toBe(200);
+    expect(store.getRun(runId)).toBeNull();
+    expect(store.getSteps(runId)).toEqual([]);
+    expect(store.eventsAfter(runId, 0)).toEqual([]);
+    expect((await fetch(`${base}/runs/${runId}`)).status).toBe(404);
+    expect((await fetch(`${base}/runs/${runId}`, { method: "DELETE" })).status).toBe(404);
+  });
+
+  test("refuses to delete a run that is still going", async () => {
+    const { runId } = (await (await post("/runs", { graph: { steps: [{ id: "a", prompt: "step a slow" }] } })).json()) as { runId: string };
+
+    const del = await fetch(`${base}/runs/${runId}`, { method: "DELETE" });
+    expect(del.status).toBe(409);
+    expect(((await del.json()) as any).error.message).toContain("cancel it before deleting");
+
+    expect((await post(`/runs/${runId}/cancel`)).status).toBe(202);
+    await engine.whenSettled(runId);
+    expect((await fetch(`${base}/runs/${runId}`, { method: "DELETE" })).status).toBe(200);
+  });
+
   test("replays stored events and resumes after Last-Event-ID", async () => {
     const { runId } = (await (await post("/runs", { graph })).json()) as { runId: string };
     await engine.whenSettled(runId);

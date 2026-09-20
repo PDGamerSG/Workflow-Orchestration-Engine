@@ -17,7 +17,7 @@ export function createApp({ engine, store, webOrigin, ssePollMs }: AppDeps): exp
 
   app.use((req, res, next) => {
     res.setHeader("Access-Control-Allow-Origin", webOrigin);
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, Last-Event-ID");
     if (req.method === "OPTIONS") {
       res.status(204).end();
@@ -59,6 +59,11 @@ export function createApp({ engine, store, webOrigin, ssePollMs }: AppDeps): exp
   app.post("/runs/:id/retry", (req, res) => {
     engine.retry(req.params.id);
     res.status(202).json({ ok: true });
+  });
+
+  app.delete("/runs/:id", (req, res) => {
+    engine.delete(req.params.id);
+    res.status(200).json({ ok: true });
   });
 
   app.use((req, _res) => {

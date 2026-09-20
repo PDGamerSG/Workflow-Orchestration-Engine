@@ -413,6 +413,15 @@ export class Store {
     return rows.map((r) => r.id);
   }
 
+  /** Removes a run with its steps and events. Returns false when the run is already gone. */
+  deleteRun(runId: string): boolean {
+    return this.tx(() => {
+      this.q("DELETE FROM events WHERE run_id = ?").run(runId);
+      this.q("DELETE FROM steps WHERE run_id = ?").run(runId);
+      return this.q("DELETE FROM runs WHERE id = ?").run(runId).changes > 0;
+    });
+  }
+
   cacheGet(key: string): { output: string; sources: Source[] } | null {
     const row = this.q("SELECT output, sources_json FROM step_cache WHERE key = ?").get(key) as {
       output: string;
