@@ -82,10 +82,10 @@ server/src/
   llm/gemini.ts         Gemini implementation
   llm/fake.ts           scripted provider for tests and benchmarks
   llm/pricing.ts        price table and cost function
-  planner/planner.ts    goal to graph, with a validation feedback loop
-  planner/replanner.ts  replacement subgraph for a failed branch
-  planner/profiles.ts   system prompts for the general and research profiles
-server/scripts/bench.ts sequential vs parallel benchmark
+  llm/demo.ts           keyless provider for running the stack without an API key
+  planner/planner.ts    goal to graph and branch repair, with a validation feedback loop
+  planner/profiles.ts   prompts, response schemas, and the research graph shape
+server/scripts/         benchmark and crash recovery demo
 ```
 
 ## Workflow definition
