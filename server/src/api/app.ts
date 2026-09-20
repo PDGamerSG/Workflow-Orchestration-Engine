@@ -28,7 +28,7 @@ export function createApp({ engine, store, webOrigin, ssePollMs }: AppDeps): exp
   app.use(express.json({ limit: "1mb" }));
 
   app.get("/health", (_req, res) => {
-    res.json({ ok: true, workerId: engine.workerId });
+    res.json({ ok: true, workerId: engine.workerId, pid: process.pid });
   });
 
   app.post("/runs", (req, res) => {

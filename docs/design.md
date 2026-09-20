@@ -337,7 +337,7 @@ Every error has the body `{ "error": { "code": string, "message": string, "issue
 | `GET /runs/:id/events` | | `text/event-stream`. Replays events with id greater than `Last-Event-ID` or `?after=`, then streams live ones. Heartbeat comment every 15 seconds. |
 | `POST /runs/:id/cancel` | | 202. 409 if the run is already finished. |
 | `POST /runs/:id/retry` | | 202. Resets failed and skipped steps to `pending` and sets the run to `running`. 409 unless the run is `failed`. |
-| `GET /health` | | 200 `{ ok, workerId }` |
+| `GET /health` | | 200 `{ ok, workerId, pid }` |
 
 The SSE handler tails the `events` table by id. The local event bus wakes it immediately for events written by the same process. A 1 second poll catches events written by other processes.
 
@@ -371,9 +371,11 @@ Live updates use one `EventSource` per page. A reducer applies each event to the
 
 `web/` must pass `tsc --noEmit` and `next build`. The run reducer has its own unit tests.
 
-## Benchmark
+## Benchmark and demos
 
-`bun run bench` runs a 12-step research-shaped graph on `FakeProvider` with 800 to 1,500 ms of simulated latency per call. It runs once at concurrency 1 and once at concurrency 4, and writes wall time for both to `docs/benchmark.md`. `bun run bench --real "<goal>"` does the same against Gemini and also records tokens and cost.
+`bun run bench` runs a 12-step research-shaped graph on `FakeProvider` with fixed per-step latency, at 1, 2, 4 and 8 steps at once, and compares Relay's scheduler with the level-by-level approach on a mixed-latency graph. It writes `docs/benchmark.md`.
+
+`bun run demo:crash` starts two engine processes on one database, kills the first mid-step, and checks that the second finishes the run without repeating a finished step.
 
 ## Configuration
 
@@ -384,6 +386,7 @@ Live updates use one `EventSource` per page. A reducer applies each event to the
 | `GEMINI_MODEL` | `gemini-3.5-flash` |
 | `GEMINI_RPM` | `60`. Set `5` on the Gemini free tier. |
 | `SEARCH_ENABLED` | `true` |
+| `LEASE_TTL_MS` | `30000`. The heartbeat is a third of it, the sweep at most 5 s. |
 | `PRICE_INPUT_PER_M`, `PRICE_OUTPUT_PER_M`, `PRICE_SEARCH_PER_K` | Gemini 3.5 Flash list prices |
 | `DATABASE_PATH` | `data/relay.db` |
 | `PORT` | `4000` |

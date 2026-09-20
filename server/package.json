@@ -7,7 +7,9 @@
     "dev": "bun --env-file=../.env --watch src/index.ts",
     "start": "bun --env-file=../.env src/index.ts",
     "test": "bun test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "bench": "bun scripts/bench.ts",
+    "demo:crash": "bun scripts/crash-demo.ts"
   },
   "dependencies": {
     "@google/genai": "2.22.0",

@@ -182,7 +182,7 @@ describe("HTTP API", () => {
   test("allows the dashboard origin", async () => {
     const res = await fetch(`${base}/health`);
     expect(res.headers.get("access-control-allow-origin")).toBe("http://localhost:3000");
-    expect(await res.json()).toEqual({ ok: true, workerId: engine.workerId });
+    expect(await res.json()).toEqual({ ok: true, workerId: engine.workerId, pid: process.pid });
 
     const preflight = await fetch(`${base}/runs`, { method: "OPTIONS" });
     expect(preflight.status).toBe(204);

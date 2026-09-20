@@ -22,7 +22,17 @@ const provider: LlmProvider =
     : createDemoProvider();
 
 const planner = new Planner(provider, { searchEnabled: config.searchEnabled });
-const engine = new Engine({ store, provider, planner, pricing: config.pricing, rpm: config.rpm });
+const engine = new Engine({
+  store,
+  provider,
+  planner,
+  pricing: config.pricing,
+  rpm: config.rpm,
+  leaseTtlMs: config.leaseTtlMs,
+  // Renew three times per lease period so one slow heartbeat never loses the run.
+  heartbeatMs: Math.floor(config.leaseTtlMs / 3),
+  sweepMs: Math.min(5_000, Math.floor(config.leaseTtlMs / 2)),
+});
 const app = createApp({ engine, store, webOrigin: config.webOrigin });
 
 engine.start();
