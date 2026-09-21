@@ -19,7 +19,7 @@ const store = new Store(databasePath);
 const provider: LlmProvider =
   config.provider === "gemini"
     ? new GeminiProvider({ apiKey: config.googleApiKey!, model: config.model })
-    : createDemoProvider();
+    : createDemoProvider({ failureRate: config.demoFailureRate });
 
 const planner = new Planner(provider, { searchEnabled: config.searchEnabled });
 const engine = new Engine({

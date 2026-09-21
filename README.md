@@ -13,6 +13,10 @@ A durable workflow engine for LLM agents. Describe a goal, and a planner model t
 - **Keeps the cost visible.** Every attempt records input tokens, output tokens, search calls and USD. A run can carry a token or dollar budget, and the engine stops launching steps once it is spent.
 - **Streams progress.** The dashboard loads a snapshot, then follows server-sent events, so the graph, the step panel, and the timeline update while the run executes.
 
+## The dashboard
+
+The run page follows the run on its own: the side panel shows the step that is running, the one that failed, or the finished result, until a step is clicked. A chosen step goes into the address bar as `?step=`, so a link points at the step being discussed, and every event in the timeline opens the step it names. The result can be copied or saved as markdown with its sources, the tab title carries the step count while a run works, and the run list filters by status, searches goals and deletes runs that are over. Steps in the graph take keyboard focus and answer Enter and Space. The theme follows the system until the switch in the header pins light or dark.
+
 ## Quick start
 
 ```bash
@@ -104,6 +108,7 @@ final attempts per step:    step_1=1 step_2=1 step_3=1 step_4=2 step_5=1 step_6=
 | `GET /runs/:id/events` | Server-sent events, replayed from `Last-Event-ID` or `?after=`. |
 | `POST /runs/:id/cancel` | Cancels a planning or running run from any worker process. |
 | `POST /runs/:id/retry` | Re-runs the failed and skipped steps of a failed run. |
+| `DELETE /runs/:id` | Removes a finished run with its steps and events. An unfinished run has to be cancelled first. |
 | `GET /health` | Liveness, the worker id, and the process id. |
 
 Errors are always `{ "error": { "code", "message", "issues"? } }`, and an invalid graph comes back with every validation issue.
@@ -135,6 +140,7 @@ Set these in `.env` at the repo root.
 | `GEMINI_MODEL` | `gemini-3.5-flash` | |
 | `GEMINI_RPM` | `60` | Shared token bucket for every run in the process |
 | `SEARCH_ENABLED` | `true` | Turn off for keys without grounding quota |
+| `DEMO_FAILURE_RATE` | `0` | With `LLM_PROVIDER=demo`, the share of step calls that fail like an overloaded API. Planner calls never fail, so retries, re-plans and skips can be watched without a key |
 | `LEASE_TTL_MS` | `30000` | How long a dead worker's runs wait before another claims them |
 | `DATABASE_PATH` | `data/relay.db` | |
 | `PORT` | `4000` | |
@@ -149,7 +155,7 @@ server/src/planner    goal to graph, research profile, re-planning
 server/src/llm        provider interface, Gemini, demo provider, pricing
 server/src/api        REST routes and the event stream
 server/scripts        benchmark and crash recovery demo
-web/lib               API client, run state reducer, graph layout
+web/lib               API client, run state reducer, graph layout, step selection
 web/components        graph, step panel, timeline, forms
 docs/design.md        the design this was built from
 ```
@@ -157,7 +163,7 @@ docs/design.md        the design this was built from
 ## Tests
 
 ```bash
-bun run test      # 118 tests: engine, planner, API, dashboard reducer
+bun run test      # 138 tests: engine, planner, API, dashboard reducer and selection
 bun run typecheck
 ```
 

@@ -472,3 +472,13 @@ a {
     opacity: 1;
   }
 }
+
+.event-row {
+  text-align: left;
+  cursor: pointer;
+  border-radius: var(--radius-s);
+}
+.event-row:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}

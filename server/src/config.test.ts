@@ -9,6 +9,7 @@ describe("loadConfig", () => {
       model: "gemini-3.5-flash",
       rpm: 60,
       searchEnabled: true,
+      demoFailureRate: 0,
       leaseTtlMs: 30_000,
       databasePath: "data/relay.db",
       port: 4000,

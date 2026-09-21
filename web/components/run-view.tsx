@@ -60,8 +60,13 @@ export function RunView({ runId }: { runId: string }) {
 
   if (error) {
     return (
-      <div className="error-box" role="alert">
-        {error}
+      <div role="alert">
+        <p className="error-box">{error}</p>
+        <p style={{ marginTop: 12 }}>
+          <Link href="/" className="button" data-variant="quiet">
+            Back to all runs
+          </Link>
+        </p>
       </div>
     );
   }
@@ -230,7 +235,7 @@ export function RunView({ runId }: { runId: string }) {
         </div>
         <div style={{ padding: 20 }}>
           {tab === "timeline" ? (
-            <Timeline events={state.events} startedAt={run.createdAt} />
+            <Timeline events={state.events} startedAt={run.createdAt} onSelectStep={pick} />
           ) : report ? (
             <>
               {reportJson ? (

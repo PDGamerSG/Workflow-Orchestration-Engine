@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Engine } from "../engine/engine";
 import { Store } from "../engine/store";
+import { GENERAL_PLAN_INTRO } from "../planner/profiles";
 import { Planner } from "../planner/planner";
 import { createDemoProvider, sampleFromSchema } from "./demo";
 
@@ -35,6 +36,26 @@ describe("demo provider", () => {
       expect(run.graph!.steps.some((s) => s.final)).toBe(true);
     });
   }
+
+  test("fails step calls at the failure rate but never planner calls", async () => {
+    const provider = createDemoProvider({ minDelayMs: 0, jitterMs: 1, failureRate: 1 });
+    const signal = new AbortController().signal;
+
+    const plan = await provider.generate({ prompt: `${GENERAL_PLAN_INTRO}
+
+Goal: pick a database`, signal });
+    expect(JSON.parse(plan.text).steps.length).toBeGreaterThan(0);
+
+    await expect(provider.generate({ prompt: "Summarise the options", signal })).rejects.toThrow("overloaded");
+  });
+
+  test("never fails when the failure rate is zero", async () => {
+    const provider = createDemoProvider({ minDelayMs: 0, jitterMs: 1 });
+    const signal = new AbortController().signal;
+    for (let i = 0; i < 20; i++) {
+      expect((await provider.generate({ prompt: "Summarise the options", signal })).text).toContain("Demo answer");
+    }
+  });
 
   test("sampleFromSchema satisfies nested schemas", () => {
     expect(
