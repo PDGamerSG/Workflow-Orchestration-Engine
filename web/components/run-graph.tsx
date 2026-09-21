@@ -8,28 +8,34 @@ import { NODE_HEIGHT, NODE_WIDTH, type GraphLayout } from "@/lib/layout";
 import type { Graph, Step, StepDef } from "@/lib/types";
 import { Lamp, statusWord } from "./lamp";
 
-type StepNodeData = { def: StepDef; step: Step | undefined; selected: boolean; now: number };
+type StepNodeData = { def: StepDef; step: Step | undefined; selected: boolean; now: number; onSelect: (id: string) => void };
 type StepFlowNode = Node<StepNodeData, "step">;
 
 const StepNode = memo(function StepNode({ data }: NodeProps<StepFlowNode>) {
-  const { def, step, selected, now } = data;
+  const { def, step, selected, now, onSelect } = data;
   const status = step?.status ?? "pending";
   const elapsed = step?.startedAt ? (step.finishedAt ?? now) - step.startedAt : null;
 
   return (
     <div
-      style={{
-        width: NODE_WIDTH,
-        height: NODE_HEIGHT,
-        padding: "10px 12px",
-        background: status === "failed" ? "var(--stop-soft)" : "var(--bg)",
-        border: `${selected ? 2 : 1}px solid ${selected ? "var(--ink)" : status === "running" ? "var(--caution)" : "var(--rule-strong)"}`,
-        // The final step ends the line, drawn like a buffer stop.
-        borderRight: def.final ? `5px double ${selected ? "var(--ink)" : "var(--rule-strong)"}` : undefined,
-        borderRadius: "var(--radius-s)",
-        cursor: "pointer",
-        opacity: status === "skipped" ? 0.6 : 1,
+      className="step-node"
+      // Focusable with a button's keys, so the graph can be walked without a mouse.
+      role="button"
+      tabIndex={0}
+      aria-pressed={selected}
+      aria-label={`Step ${def.id}, ${statusWord(status).toLowerCase()}`}
+      // The borders live in the stylesheet: the final step's buffer stop is one edge of the
+      // same border, which React cannot express next to a width for all four sides.
+      data-status={status}
+      data-selected={selected ? "" : undefined}
+      data-final={def.final ? "" : undefined}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onSelect(def.id);
+        }
       }}
+      style={{ width: NODE_WIDTH, height: NODE_HEIGHT }}
     >
       <Handle type="target" position={Position.Left} style={{ opacity: 0 }} isConnectable={false} />
       <div className="flex items-center gap-2" style={{ minWidth: 0 }}>
@@ -68,7 +74,7 @@ export function RunGraph(props: {
     id: def.id,
     type: "step",
     position: positions[def.id]!,
-    data: { def, step: steps[def.id], selected: def.id === selectedId, now },
+    data: { def, step: steps[def.id], selected: def.id === selectedId, now, onSelect },
     draggable: false,
     connectable: false,
   }));
@@ -102,6 +108,7 @@ export function RunGraph(props: {
         nodesDraggable={false}
         nodesConnectable={false}
         elementsSelectable={false}
+        proOptions={{ hideAttribution: false }}
       >
         <Background gap={24} size={1.2} color="var(--rule)" />
         <Controls showInteractive={false} position="bottom-left" />

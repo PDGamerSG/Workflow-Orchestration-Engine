@@ -29,8 +29,12 @@
   color-scheme: light;
 }
 
+/*
+ * Dark follows the system unless the theme switch pinned a side. The values appear in two
+ * rules because a media query cannot share a selector list with a plain one.
+ */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #172122;
     --panel: #1e2a2b;
     --panel-sunk: #142021;
@@ -50,6 +54,27 @@
 
     color-scheme: dark;
   }
+}
+
+:root[data-theme="dark"] {
+  --bg: #172122;
+  --panel: #1e2a2b;
+  --panel-sunk: #142021;
+  --ink: #e3e9e8;
+  --ink-2: #a9b6b5;
+  --ink-3: #7d8b8a;
+  --rule: #34403f;
+  --rule-strong: #52605f;
+
+  --go: #3fb07e;
+  --caution: #e7a33b;
+  --stop: #e0655b;
+  --off: #66726f;
+  --go-soft: #1f3a2f;
+  --caution-soft: #3d311b;
+  --stop-soft: #3f2322;
+
+  color-scheme: dark;
 }
 
 html {
@@ -325,4 +350,125 @@ a {
 }
 .react-flow__attribution a {
   color: var(--ink-3);
+}
+
+/* Buttons, chips and the segmented switch */
+
+.button[data-size="small"] {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 13px;
+}
+.button[data-variant="quiet"]:hover:not(:disabled),
+.button[data-variant="danger"]:hover:not(:disabled) {
+  background: var(--panel-sunk);
+}
+.button:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.segmented {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--panel-sunk);
+  border-radius: var(--radius-s);
+}
+.segmented button {
+  padding: 3px 9px;
+  border-radius: 2px;
+  font-size: 13px;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+.segmented button[data-selected] {
+  background: var(--panel);
+  color: var(--ink);
+  font-weight: 700;
+  box-shadow: var(--shadow-node);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-2);
+  font-size: 13px;
+  cursor: pointer;
+}
+.chip:hover {
+  border-color: var(--rule-strong);
+}
+.chip[aria-pressed="true"] {
+  border-color: var(--ink);
+  color: var(--ink);
+  font-weight: 700;
+}
+.chip small {
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Graph nodes */
+
+.step-node {
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-s);
+  cursor: pointer;
+  transition: box-shadow 120ms ease;
+}
+.step-node[data-status="running"] {
+  border-color: var(--caution);
+}
+.step-node[data-status="failed"] {
+  background: var(--stop-soft);
+}
+.step-node[data-status="skipped"] {
+  opacity: 0.6;
+}
+.step-node[data-selected] {
+  border-width: 2px;
+  border-color: var(--ink);
+}
+/* The final step ends the line, drawn like a buffer stop. Last, so it wins on the right edge. */
+.step-node[data-final] {
+  border-right-width: 5px;
+  border-right-style: double;
+}
+.step-node:hover {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--rule-strong) 45%, transparent);
+}
+.step-node:focus-visible {
+  outline: 2px solid var(--caution);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .step-node {
+    transition: none;
+  }
+}
+
+/* Table rows */
+
+.runs-table tbody tr:hover {
+  background: color-mix(in srgb, var(--panel-sunk) 60%, transparent);
+}
+.row-actions {
+  opacity: 0;
+}
+.runs-table tbody tr:hover .row-actions,
+.row-actions:focus-within {
+  opacity: 1;
+}
+@media (hover: none) {
+  .row-actions {
+    opacity: 1;
+  }
 }

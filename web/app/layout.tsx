@@ -10,9 +10,15 @@ export const metadata: Metadata = {
   description: "Plan, run and watch durable LLM workflows.",
 };
 
+// Applies the stored theme before the first paint, so a reload never flashes the other one.
+const THEME_SCRIPT = `try{var t=localStorage.getItem("relay-theme");if(t&&t!=="system")document.documentElement.dataset.theme=t}catch(e){}`;
+
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
-    <html lang="en" className={`${sans.variable} ${mono.variable}`}>
+    <html lang="en" className={`${sans.variable} ${mono.variable}`} suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: THEME_SCRIPT }} />
+      </head>
       <body>{children}</body>
     </html>
   );

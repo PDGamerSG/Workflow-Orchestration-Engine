@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { api, API_URL } from "@/lib/api";
+import { ThemeToggle } from "./theme-toggle";
 
 /** The page header, with a lamp that shows whether the engine answers. */
 export function TopBar() {
@@ -28,10 +29,13 @@ export function TopBar() {
       <Link href="/" className="wordmark">
         Relay <small className="hidden sm:inline">durable LLM workflows</small>
       </Link>
-      <span className="inline-flex items-center gap-2 text-sm" style={{ color: "var(--ink-2)" }} title={API_URL}>
-        <span className="lamp" data-state={online === null ? "pending" : online ? "succeeded" : "failed"} aria-hidden="true" />
-        {online === null ? "Checking engine" : online ? "Engine connected" : "Engine offline"}
-      </span>
+      <div className="flex items-center gap-4">
+        <span className="inline-flex items-center gap-2 text-sm" style={{ color: "var(--ink-2)" }} title={API_URL}>
+          <span className="lamp" data-state={online === null ? "pending" : online ? "succeeded" : "failed"} aria-hidden="true" />
+          <span className="hidden sm:inline">{online === null ? "Checking engine" : online ? "Engine connected" : "Engine offline"}</span>
+        </span>
+        <ThemeToggle />
+      </div>
     </header>
   );
 }

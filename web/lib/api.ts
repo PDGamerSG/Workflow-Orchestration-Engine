@@ -40,5 +40,6 @@ export const api = {
     request<{ runId: string }>("/runs", { method: "POST", body: JSON.stringify(body) }).then((r) => r.runId),
   cancelRun: (id: string) => request<{ ok: true }>(`/runs/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
   retryRun: (id: string) => request<{ ok: true }>(`/runs/${encodeURIComponent(id)}/retry`, { method: "POST" }),
+  deleteRun: (id: string) => request<{ ok: true }>(`/runs/${encodeURIComponent(id)}`, { method: "DELETE" }),
   eventsUrl: (id: string, after: number) => `${API_URL}/runs/${encodeURIComponent(id)}/events?after=${after}`,
 };
