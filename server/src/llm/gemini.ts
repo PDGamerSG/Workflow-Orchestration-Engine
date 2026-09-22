@@ -36,6 +36,16 @@ export class GeminiProvider implements LlmProvider {
 
 type ResponseLike = Pick<GenerateContentResponse, "candidates" | "usageMetadata"> & { text?: string };
 
+/** True for the http and https URLs that are safe to render as a link. */
+export function isWebUrl(value: string): boolean {
+  try {
+    const { protocol } = new URL(value);
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 export function mapResponse(response: ResponseLike): LlmResult {
   const grounding = response.candidates?.[0]?.groundingMetadata;
 
@@ -43,7 +53,8 @@ export function mapResponse(response: ResponseLike): LlmResult {
   const seen = new Set<string>();
   for (const chunk of grounding?.groundingChunks ?? []) {
     const url = chunk.web?.uri;
-    if (!url || seen.has(url)) continue;
+    // A citation ends up as a link in the dashboard, so only web URLs are kept.
+    if (!url || seen.has(url) || !isWebUrl(url)) continue;
     seen.add(url);
     sources.push({ title: chunk.web?.title || url, url });
   }

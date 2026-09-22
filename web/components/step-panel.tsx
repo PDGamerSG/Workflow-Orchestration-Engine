@@ -6,6 +6,7 @@ import { formatCost, formatDuration, formatTokens, tryPrettyJson } from "@/lib/f
 import type { Step, StepDef } from "@/lib/types";
 import { CopyButton } from "./copy-button";
 import { Status } from "./lamp";
+import { SourceList } from "./source-list";
 
 export function StepPanel({
   def,
@@ -98,15 +99,7 @@ export function StepPanel({
 
       {step.sources.length > 0 && (
         <Section title={`Sources (${step.sources.length})`}>
-          <ol style={{ listStyle: "decimal", paddingLeft: 20, fontSize: 13 }}>
-            {step.sources.map((s) => (
-              <li key={s.url} style={{ marginBottom: 4 }}>
-                <a href={s.url} target="_blank" rel="noreferrer" style={{ textUnderlineOffset: 2 }}>
-                  {s.title}
-                </a>
-              </li>
-            ))}
-          </ol>
+          <SourceList sources={step.sources} />
         </Section>
       )}
 

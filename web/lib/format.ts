@@ -34,3 +34,16 @@ export function tryPrettyJson(text: string): string | null {
     return null;
   }
 }
+
+/**
+ * A source URL is whatever the model sent back, and it ends up in an href. Only http and
+ * https are handed to the browser; anything else is shown as plain text.
+ */
+export function webUrl(value: string): string | null {
+  try {
+    const { protocol } = new URL(value);
+    return protocol === "http:" || protocol === "https:" ? value : null;
+  } catch {
+    return null;
+  }
+}

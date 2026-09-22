@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ApiError } from "@google/genai";
-import { mapError, mapResponse } from "./gemini";
+import { isWebUrl, mapError, mapResponse } from "./gemini";
 import { LlmError } from "./provider";
 
 describe("mapResponse", () => {
@@ -38,12 +38,45 @@ describe("mapResponse", () => {
     });
   });
 
+  test("drops citations that are not web links", () => {
+    const result = mapResponse({
+      text: "answer",
+      candidates: [
+        {
+          groundingMetadata: {
+            groundingChunks: [
+              { web: { title: "Real source", uri: "https://example.com/a" } },
+              { web: { title: "Script", uri: "javascript:alert(1)" } },
+              { web: { title: "Inline", uri: "data:text/html,<script>alert(1)</script>" } },
+              { web: { title: "Nonsense", uri: "not a url" } },
+            ],
+          },
+        },
+      ],
+    });
+
+    expect(result.sources).toEqual([{ title: "Real source", url: "https://example.com/a" }]);
+  });
+
   test("handles a response with no grounding or usage", () => {
     expect(mapResponse({ text: undefined, candidates: [] })).toEqual({
       text: "",
       sources: [],
       usage: { inputTokens: 0, outputTokens: 0, searchCalls: 0 },
     });
+  });
+});
+
+describe("isWebUrl", () => {
+  test("accepts http and https only", () => {
+    expect(isWebUrl("https://example.com")).toBe(true);
+    expect(isWebUrl("http://example.com/path?q=1")).toBe(true);
+    expect(isWebUrl("javascript:alert(1)")).toBe(false);
+    expect(isWebUrl("JavaScript:alert(1)")).toBe(false);
+    expect(isWebUrl("data:text/html,x")).toBe(false);
+    expect(isWebUrl("file:///etc/passwd")).toBe(false);
+    expect(isWebUrl("")).toBe(false);
+    expect(isWebUrl("//example.com")).toBe(false);
   });
 });
 
