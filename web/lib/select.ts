@@ -34,3 +34,19 @@ export function autoSelectStep(state: RunState): string | null {
 function earliest(steps: Step[]): Step {
   return steps.reduce((a, b) => ((a.startedAt ?? Infinity) <= (b.startedAt ?? Infinity) ? a : b));
 }
+
+/**
+ * Every source the run's steps cited, deduplicated by URL in topological order. The step that
+ * writes a report usually has no sources of its own: they belong to the researchers upstream.
+ */
+export function runSources(state: RunState): { title: string; url: string; steps: string[] }[] {
+  const byUrl = new Map<string, { title: string; url: string; steps: string[] }>();
+  for (const step of currentSteps(state)) {
+    for (const source of step.sources) {
+      const found = byUrl.get(source.url);
+      if (found) found.steps.push(step.stepId);
+      else byUrl.set(source.url, { title: source.title, url: source.url, steps: [step.stepId] });
+    }
+  }
+  return [...byUrl.values()];
+}

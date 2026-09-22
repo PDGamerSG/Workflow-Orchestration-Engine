@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { RunState } from "./run-reducer";
-import { autoSelectStep, finalStepId } from "./select";
+import { autoSelectStep, finalStepId, runSources } from "./select";
 import type { Graph, Run, Step, Totals } from "./types";
 
 const graph: Graph = {
@@ -102,5 +102,27 @@ describe("autoSelectStep", () => {
 
   test("falls back to the first step when nothing has started", () => {
     expect(autoSelectStep(state([step("a"), step("b"), step("c")]))).toBe("a");
+  });
+});
+
+describe("runSources", () => {
+  test("collects sources across steps, keeping one entry per URL", () => {
+    const shared = { title: "Shared", url: "https://example.com/shared" };
+    const collected = runSources(
+      state([
+        step("a", { status: "succeeded", sources: [shared, { title: "Only A", url: "https://example.com/a" }] }),
+        step("b", { status: "succeeded", sources: [shared] }),
+        step("c", { status: "succeeded", sources: [] }),
+      ]),
+    );
+
+    expect(collected).toEqual([
+      { title: "Shared", url: "https://example.com/shared", steps: ["a", "b"] },
+      { title: "Only A", url: "https://example.com/a", steps: ["a"] },
+    ]);
+  });
+
+  test("is empty for a run that did not search", () => {
+    expect(runSources(state([step("a", { status: "succeeded" })]))).toEqual([]);
   });
 });
