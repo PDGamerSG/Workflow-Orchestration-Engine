@@ -7,6 +7,7 @@ import { countByFilter, filterRuns, RUN_FILTERS, type RunFilter } from "@/lib/fi
 import { formatAge, formatCost } from "@/lib/format";
 import type { RunSummary, StepStatus } from "@/lib/types";
 import { useNow } from "@/lib/use-run";
+import { ConfirmButton } from "./confirm-button";
 import { Status } from "./lamp";
 
 const BAR_ORDER: { status: StepStatus; color: string }[] = [
@@ -48,7 +49,6 @@ export function RunsTable() {
   const shown = useMemo(() => filterRuns(runs ?? [], filter, query), [runs, filter, query]);
 
   async function remove(run: RunSummary) {
-    if (!confirm(`Delete "${run.goal ?? run.id}" and everything it recorded?`)) return;
     setDeleting(run.id);
     // Drop the row at once; the poll below confirms it.
     setRuns((current) => current?.filter((r) => r.id !== run.id) ?? null);
@@ -146,17 +146,14 @@ export function RunsTable() {
                     <td style={{ ...td, textAlign: "right" }}>
                       {!active && (
                         <span className="row-actions">
-                          <button
-                            type="button"
-                            className="button"
-                            data-variant="quiet"
-                            data-size="small"
+                          <ConfirmButton
+                            small
+                            label="Delete"
+                            confirmLabel="Delete for good"
                             disabled={deleting === run.id}
-                            onClick={() => remove(run)}
-                            aria-label={`Delete run ${run.id}`}
-                          >
-                            Delete
-                          </button>
+                            onConfirm={() => remove(run)}
+                            ariaLabel={`Delete run ${run.id}`}
+                          />
                         </span>
                       )}
                     </td>

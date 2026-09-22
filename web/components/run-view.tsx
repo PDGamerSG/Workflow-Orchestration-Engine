@@ -11,6 +11,7 @@ import { layoutGraph } from "@/lib/layout";
 import { currentSteps, supersededSteps } from "@/lib/run-reducer";
 import { autoSelectStep, finalStepId, runSources } from "@/lib/select";
 import { useNow, useRun } from "@/lib/use-run";
+import { ConfirmButton } from "./confirm-button";
 import { CopyButton, DownloadButton } from "./copy-button";
 import { Lamp, Status, statusWord } from "./lamp";
 import { RunGraph } from "./run-graph";
@@ -86,7 +87,6 @@ export function RunView({ runId }: { runId: string }) {
   const sources = runSources(state);
 
   async function act(action: "cancel" | "retry" | "delete") {
-    if (action === "delete" && !confirm("Delete this run and everything it recorded?")) return;
     setBusy(true);
     setActionError(null);
     try {
@@ -134,11 +134,7 @@ export function RunView({ runId }: { runId: string }) {
               Run again
             </Link>
           )}
-          {!active && (
-            <button className="button" data-variant="quiet" disabled={busy} onClick={() => act("delete")}>
-              Delete
-            </button>
-          )}
+          {!active && <ConfirmButton label="Delete" confirmLabel="Delete for good" disabled={busy} onConfirm={() => act("delete")} />}
         </div>
       </div>
 
