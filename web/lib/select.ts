@@ -9,7 +9,7 @@ export function finalStepId(graph: Graph | null): string | null {
 }
 
 /**
- * The step to show when the person has not picked one. While a run works that is what is
+ * The step to show when the user has not picked one. While a run works that is what is
  * running, so the panel follows the run; afterwards it is the failure to read or the result.
  */
 export function autoSelectStep(state: RunState): string | null {

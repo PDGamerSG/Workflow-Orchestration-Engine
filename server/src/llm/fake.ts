@@ -54,7 +54,6 @@ export class FakeProvider implements LlmProvider {
     }
   }
 
-  /** Calls whose prompt contains `needle`. */
   callsMatching(needle: string): LlmRequest[] {
     return this.calls.filter((c) => c.prompt.includes(needle));
   }

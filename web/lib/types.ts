@@ -70,7 +70,6 @@ export type RunSnapshot = { run: Run; steps: Step[]; totals: Totals; lastEventId
 
 type RunEnd = { error?: string | null; totals?: Totals; issues?: string[] };
 
-/** Payload of each event type the engine writes. */
 export type EventPayloads = {
   "run.created": { graph: Graph | null; goal: string | null; profile: Profile | null };
   "run.planned": { graph: Graph; attempts: number; usage: Totals };

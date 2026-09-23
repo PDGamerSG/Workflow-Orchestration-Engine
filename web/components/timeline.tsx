@@ -2,7 +2,6 @@ import { eventStepId } from "@/lib/events";
 import { formatCost, formatDuration } from "@/lib/format";
 import type { RunEvent } from "@/lib/types";
 
-/** Turns an engine event into one line a person can read. */
 export function describeEvent(event: RunEvent): string {
   switch (event.type) {
     case "run.created": {

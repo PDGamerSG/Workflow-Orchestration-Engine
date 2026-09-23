@@ -5,7 +5,6 @@ import { useEffect, useState } from "react";
 import { api, API_URL } from "@/lib/api";
 import { ThemeToggle } from "./theme-toggle";
 
-/** The page header, with a lamp that shows whether the engine answers. */
 export function TopBar() {
   const [online, setOnline] = useState<boolean | null>(null);
 

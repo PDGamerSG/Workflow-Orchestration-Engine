@@ -28,7 +28,6 @@ export function CopyButton({ text, label = "Copy", small }: { text: string; labe
   );
 }
 
-/** Saves `text` as a file the browser downloads. */
 export function DownloadButton({ text, filename, label = "Download", small }: { text: string; filename: string; label?: string; small?: boolean }) {
   function download() {
     const url = URL.createObjectURL(new Blob([text], { type: "text/markdown;charset=utf-8" }));

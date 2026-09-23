@@ -154,7 +154,6 @@ export class Planner {
     return checked(buildResearchGraph(subQuestions, this.searchEnabled));
   }
 
-  /** Converts the model's step format into StepDefs. */
   private parseSteps(text: string): Attempt<StepDef[]> {
     const json = parseJson(text);
     if (!json.ok) return json;
