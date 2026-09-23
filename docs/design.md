@@ -1,4 +1,4 @@
-# Relay design
+# Design notes
 
 Relay is a durable workflow engine for LLM agents. You give it a goal. A planner model turns the goal into a graph of steps, the engine runs independent steps in parallel, and every result lands in SQLite. If the process dies, another process picks the run up and continues from the last finished step. A Next.js dashboard draws the graph and updates it live.
 
@@ -58,35 +58,7 @@ The repo has two Bun workspaces.
 - `server/` owns all state. It is the only thing that talks to SQLite and Gemini.
 - `web/` is a Next.js App Router app. It holds no state of its own and reads everything from the server over HTTP.
 
-The split matters for runs that take minutes. A Next.js dev reload restarts the web process, and the engine keeps running.
-
-### Server layout
-
-```
-server/src/
-  index.ts              wiring: config, store, provider, engine, HTTP server, shutdown
-  config.ts             env parsing with zod
-  api/app.ts            express app, routes, error middleware
-  api/sse.ts            event stream with Last-Event-ID replay
-  engine/types.ts       StepDef, Graph, RunStatus, StepStatus, Event types
-  engine/graph.ts       validation, dependency inference, cycle detection, topo order
-  engine/template.ts    {{id.output}}, {{id.output.path}}, {{id.sources}} resolution
-  engine/store.ts       SQLite schema, migrations, queries
-  engine/scheduler.ts   runs one graph to completion
-  engine/engine.ts      owns schedulers, leases, sweeper, cancel, retry, replan hook
-  engine/retry.ts       backoff with jitter, retryable error classification
-  engine/rate-limiter.ts  token bucket shared by every run in the process
-  engine/cache.ts       content-addressed step output cache
-  engine/events.ts      in-process event bus used to wake SSE streams
-  llm/provider.ts       LlmProvider interface and LlmError
-  llm/gemini.ts         Gemini implementation
-  llm/fake.ts           scripted provider for tests and benchmarks
-  llm/pricing.ts        price table and cost function
-  llm/demo.ts           keyless provider for running the stack without an API key
-  planner/planner.ts    goal to graph and branch repair, with a validation feedback loop
-  planner/profiles.ts   prompts, response schemas, and the research graph shape
-server/scripts/         benchmark and crash recovery demo
-```
+Runs can take minutes, and a Next.js dev reload restarts the web process. Keeping the engine separate means a reload does not kill a run.
 
 ## Workflow definition
 
@@ -250,7 +222,7 @@ When a step fails for good:
 
 1. If the run has a goal and `replans < max_replans` (default 2), the engine calls the replanner. It sends the goal, the failed step's prompt and error, and the output of every succeeded step truncated to 2,000 characters.
 2. The model writes 1 to 3 replacement steps. They may reference only succeeded steps or each other. The last one stands in for the failed step and inherits its output contract (text, or the same JSON schema).
-3. Code does the graph surgery, not the model. The failed step and its unfinished descendants become `superseded`. Each descendant is recreated under a new id (`report` becomes `report_r2`) with its template references renamed, so `{{failed.output.x}}` becomes `{{replacement.output.x}}`. Ids that collide with existing rows get the next free `_rN` suffix.
+3. Code, not the model, rewires the graph. The failed step and its unfinished descendants become `superseded`. Each descendant is recreated under a new id (`report` becomes `report_r2`) with its template references renamed, so `{{failed.output.x}}` becomes `{{replacement.output.x}}`. Ids that collide with existing rows get the next free `_rN` suffix.
 4. The merged graph goes through `validateGraph`. Issues go back to the model, up to 3 attempts. On success the engine installs it as the next `graph_version`, emits `run.replanned`, and the scheduler reloads and continues.
 5. If there are no re-plans left, or re-planning fails, every descendant of the failed step becomes `skipped`. Independent branches keep running, and the run ends `failed`.
 
@@ -258,7 +230,7 @@ Failure hooks run one at a time, so two branches failing together cannot replan 
 
 ### Budgets
 
-A run may set `budget_tokens`, `budget_usd`, or both. Before each launch the scheduler reads the run totals. If a limit is reached, it stops launching, marks pending steps `skipped` with reason `budget`, lets in-flight steps finish, and ends the run `failed` with `budget exceeded`. In-flight steps can push the total past the limit by their own usage, and the README states that.
+A run may set `budget_tokens`, `budget_usd`, or both. Before each launch the scheduler reads the run totals. If a limit is reached, it stops launching, marks pending steps `skipped` with reason `budget`, lets in-flight steps finish, and ends the run `failed` with `budget exceeded`. In-flight steps can push the total past the limit by their own usage.
 
 ### Rate limiting
 
@@ -325,24 +297,6 @@ Default pricing for `gemini-3.5-flash` is $1.50 per 1M input tokens, $9.00 per 1
 
 `FakeProvider` takes a handler `(req, callIndex) => result | Error` and an optional delay. Tests and the benchmark use it, so neither needs an API key.
 
-## HTTP API
-
-Every error has the body `{ "error": { "code": string, "message": string, "issues"?: string[] } }`.
-
-| Method and path | Body | Result |
-|---|---|---|
-| `POST /runs` | `{ graph }` or `{ goal, profile }`, plus optional `concurrency` (1-16, default 4), `maxReplans` (0-5), `budget: { tokens?, usd? }` | 201 `{ runId }`. 400 for an invalid graph, with issues. |
-| `GET /runs` | | 200 `{ runs: RunSummary[] }`, newest first, limit 50 |
-| `GET /runs/:id` | | 200 `{ run, steps, totals }`. 404 if missing. |
-| `GET /runs/:id/events` | | `text/event-stream`. Replays events with id greater than `Last-Event-ID` or `?after=`, then streams live ones. Heartbeat comment every 15 seconds. |
-| `POST /runs/:id/cancel` | | 202. 409 if the run is already finished. |
-| `POST /runs/:id/retry` | | 202. Resets failed and skipped steps to `pending` and sets the run to `running`. 409 unless the run is `failed`. |
-| `GET /health` | | 200 `{ ok, workerId, pid }` |
-
-The SSE handler tails the `events` table by id. The local event bus wakes it immediately for events written by the same process. A 1 second poll catches events written by other processes.
-
-CORS allows `WEB_ORIGIN` (default `http://localhost:3000`).
-
 ## Dashboard
 
 Next.js App Router with Tailwind, `@xyflow/react` for the graph, `@dagrejs/dagre` for left-to-right layout, and `react-markdown` for reports.
@@ -356,53 +310,8 @@ Next.js App Router with Tailwind, `@xyflow/react` for the graph, `@dagrejs/dagre
 
 Live updates use one `EventSource` per page. A reducer applies each event to the run state. `EventSource` reconnects on its own and sends `Last-Event-ID`, so no events go missing.
 
-## Testing
-
-`bun test` in `server/`, with no network access and no API key.
-
-- `graph.test.ts` covers valid graphs, duplicate ids, unknown dependencies, self references, dependency inference from templates, cycle reports, and topological order.
-- `template.test.ts` covers text, JSON paths, sources, missing paths, and `{{goal}}`.
-- `retry.test.ts` covers classification, backoff bounds, and `retry-after`.
-- `rate-limiter.test.ts` covers burst, refill, FIFO order, and abort while waiting, using a fake clock.
-- `scheduler.test.ts` uses `FakeProvider` and an in-memory database. It covers outputs reaching dependents, the observed maximum concurrency, a slow step not blocking an unrelated branch, retry then success, failure skipping descendants only, JSON output validation and re-prompting, cancel, cache hits, and budget stops.
-- `engine.test.ts` uses a temp database file shared by two `Engine` instances. It covers resume after one engine stops without cleanup (succeeded steps are not called again), lease takeover, fencing rejecting a stale writer, graceful shutdown handoff, and retry of a failed run.
-- `planner.test.ts` covers an invalid plan followed by a valid one, giving up after 3 attempts, research shape enforcement, and a replan that merges into the graph.
-- `api.test.ts` starts the app on a random port. It covers every route, error bodies, and SSE replay with `Last-Event-ID`.
-
-`web/` must pass `tsc --noEmit` and `next build`. The run reducer has its own unit tests.
-
 ## Benchmark and demos
 
 `bun run bench` runs a 12-step research-shaped graph on `FakeProvider` with fixed per-step latency, at 1, 2, 4 and 8 steps at once, and compares Relay's scheduler with the level-by-level approach on a mixed-latency graph. It writes `docs/benchmark.md`.
 
 `bun run demo:crash` starts two engine processes on one database, kills the first mid-step, and checks that the second finishes the run without repeating a finished step.
-
-## Configuration
-
-| Variable | Default |
-|---|---|
-| `GOOGLE_API_KEY` | required unless `LLM_PROVIDER=demo` |
-| `LLM_PROVIDER` | `gemini`, or `demo` for scripted replies with no key |
-| `GEMINI_MODEL` | `gemini-3.5-flash` |
-| `GEMINI_RPM` | `60`. Set `5` on the Gemini free tier. |
-| `SEARCH_ENABLED` | `true` |
-| `LEASE_TTL_MS` | `30000`. The heartbeat is a third of it, the sweep at most 5 s. |
-| `PRICE_INPUT_PER_M`, `PRICE_OUTPUT_PER_M`, `PRICE_SEARCH_PER_K` | Gemini 3.5 Flash list prices |
-| `DATABASE_PATH` | `data/relay.db` |
-| `PORT` | `4000` |
-| `WEB_ORIGIN` | `http://localhost:3000` |
-| `NEXT_PUBLIC_API_URL` | `http://localhost:4000` |
-
-## Build order
-
-1. Workspace restructure. Move the current code to `server/`, add scripts.
-2. Graph validation and templates.
-3. SQLite store.
-4. Provider interface, fake provider, retry, rate limiter.
-5. Scheduler.
-6. Engine with leases, sweeper, shutdown, cancel, retry.
-7. HTTP API and SSE.
-8. Gemini provider, pricing, JSON output, step cache, budgets.
-9. Planner, research profile, replanner.
-10. Next.js dashboard.
-11. Benchmark, README, and demo script.
