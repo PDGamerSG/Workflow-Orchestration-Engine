@@ -6,16 +6,16 @@ A durable workflow engine for LLM agents. Describe a goal, and a planner model t
 
 ## What it does
 
-- **Runs a step the moment its inputs are ready.** The scheduler recomputes the ready set after every step settles, so a slow branch never blocks an unrelated one. On a mixed-latency graph that is 3.83 s instead of 4.65 s for the level-by-level approach it replaced.
-- **Passes results between steps.** A prompt can hold `{{step_id.output}}`, `{{step_id.output.field[0]}}` for steps that return JSON, and `{{step_id.sources}}` for search citations. References become dependencies, so the graph cannot disagree with the prompts.
-- **Survives a crash.** Each run is owned through a lease that its worker renews every few seconds. If a worker dies, another one claims the run after the lease expires, resets the steps that were in flight, and keeps every finished result.
-- **Repairs failed branches.** When a step fails for good, the planner writes replacement steps, and the engine rewires the steps that depended on it.
-- **Keeps the cost visible.** Every attempt records input tokens, output tokens, search calls and USD. A run can carry a token or dollar budget, and the engine stops launching steps once it is spent.
-- **Streams progress.** The dashboard loads a snapshot, then follows server-sent events, so the graph, the step panel, and the timeline update while the run executes.
+- Starts each step as soon as its inputs are ready, instead of waiting for a whole level. On a graph with one slow branch that is 3.83 s against 4.65 s for level by level.
+- Passes results between steps with templates: `{{step_id.output}}`, `{{step_id.output.field[0]}}` for JSON steps, and `{{step_id.sources}}` for search citations. A reference also adds the dependency, so you don't declare it twice.
+- Recovers from a crash. A worker holds each run through a lease it renews every few seconds. If the worker dies, another one claims the run once the lease expires, resets the steps that were in flight, and keeps everything that already finished.
+- Re-plans a failed branch. When a step runs out of retries, the planner writes replacement steps and the engine points the downstream steps at them.
+- Tracks cost per attempt: input and output tokens, search calls, USD. A run can have a token or dollar budget, and no new steps start once it's spent.
+- Streams progress to the dashboard over server-sent events.
 
 ## The dashboard
 
-The run page follows the run on its own: the side panel shows the step that is running, the one that failed, or the finished result, until a step is clicked. A chosen step goes into the address bar as `?step=`, so a link points at the step being discussed, and every event in the timeline opens the step it names. The result can be copied or saved as markdown with its sources, the tab title carries the step count while a run works, and the run list filters by status, searches goals and deletes runs that are over. Steps in the graph take keyboard focus and answer Enter and Space. The theme follows the system until the switch in the header pins light or dark.
+Until you click a step, the side panel shows whatever is relevant: the running step, the failed one, or the final result. Clicking a step puts it in the URL as `?step=`, so you can link to it. Timeline entries also open their step. The result can be copied or downloaded as markdown with its sources. The run list has status filters, search, and delete.
 
 ## Quick start
 
@@ -38,7 +38,7 @@ GEMINI_RPM=5
 
 Then `bun run dev`.
 
-If your key has no Google Search grounding quota, set `SEARCH_ENABLED=false`. Research runs then answer from model knowledge instead of the web, and the prompts tell the writer not to invent citations.
+If your key has no Google Search grounding quota, set `SEARCH_ENABLED=false`. Research runs then answer from model knowledge, and the prompts tell the writer not to make up citations.
 
 ## How it works
 
@@ -65,7 +65,7 @@ flowchart LR
   API -- tail events --> DB
 ```
 
-**Planning.** A goal run starts in `planning`. For the research profile the model only picks 3 to 6 sub-questions, and code builds the researcher, fact check and report steps from them, so the shape is guaranteed. For the general profile the model writes the steps itself. Either way the result goes through the same validation as a hand-written graph: unknown ids, self references and cycles are rejected, and the issues go back to the model for up to 3 attempts.
+**Planning.** A goal run starts in `planning`. For the research profile the model only picks 3 to 6 sub-questions, and code builds the researcher, fact check and report steps from them, so the shape is always the same. For the general profile the model writes the steps itself. Either way the result goes through the same validation as a hand-written graph: unknown ids, self references and cycles are rejected, and the issues go back to the model for up to 3 attempts.
 
 **Scheduling.** A step is ready when every dependency has succeeded. The scheduler starts ready steps up to the run's concurrency, resolves each prompt from saved outputs at launch time, and re-checks the ready set whenever a step settles.
 
@@ -157,27 +157,27 @@ server/src/api        REST routes and the event stream
 server/scripts        benchmark and crash recovery demo
 web/lib               API client, run state reducer, graph layout, step selection
 web/components        graph, step panel, timeline, forms
-docs/design.md        the design this was built from
+docs/design.md        design notes: data model, leases, re-planning
 ```
 
 ## Tests
 
 ```bash
-bun run test      # 157 tests: engine, planner, API, dashboard reducer and selection
+bun run test
 bun run typecheck
 ```
 
-The engine tests run two `Engine` instances against one database file to cover lease takeover, fencing and crash recovery, and a fake provider replaces the model, so the suite needs no API key and no network.
+The engine tests run two `Engine` instances on one database file to test lease takeover, fencing and crash recovery. A fake provider stands in for the model, so the tests need no API key or network.
 
 ## Design decisions
 
-**SQLite instead of a queue and a separate worker pool.** One file, no extra services, and WAL lets several processes share it. Leases and fencing already give the part that matters, which is that exactly one worker drives a run and a stale worker cannot write. Moving to Postgres later changes the store, not the scheduler.
+SQLite instead of a queue and a worker pool. It's one file and no extra services, and WAL lets several processes share it. The leases and fenced writes already guarantee that one worker drives a run and a stale worker can't write. Moving to Postgres would change the store, not the scheduler.
 
-**At-least-once, not exactly-once.** A step interrupted mid-call runs again, because the engine cannot know whether the model answered. That is the right trade for calls with no side effects, and it keeps recovery simple. A step with side effects would need an idempotency key.
+At-least-once, not exactly-once. A step interrupted mid-call runs again, because the engine can't know whether the model answered. That's fine for model calls since they have no side effects. A step with side effects would need an idempotency key.
 
-**Code owns the graph surgery, the model owns the wording.** The planner picks sub-questions and writes prompts. Building the research shape, merging a re-plan, renaming references and validating the result all happen in code, where they can be tested.
+The model writes prompts, code changes the graph. The planner picks sub-questions and writes prompts. Building the research shape, merging a re-plan, renaming references and validation all happen in code, where they have tests.
 
-**Budgets stop new steps, not running ones.** Checking before each launch is cheap and predictable. In-flight steps can push the total slightly past the limit.
+Budgets stop new steps, not running ones. Checking before each launch is cheap. Steps already in flight can push the total a little past the limit.
 
 ## Limits
 
