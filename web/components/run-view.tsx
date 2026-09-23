@@ -6,8 +6,9 @@ import { useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api, ApiError } from "@/lib/api";
-import { formatCost, formatDuration, formatTokens, tryPrettyJson, webUrl } from "@/lib/format";
+import { formatCost, formatDuration, formatTokens, tryPrettyJson } from "@/lib/format";
 import { layoutGraph } from "@/lib/layout";
+import { reportMarkdown } from "@/lib/report";
 import { currentSteps, supersededSteps } from "@/lib/run-reducer";
 import { autoSelectStep, finalStepId, runSources } from "@/lib/select";
 import { useNow, useRun } from "@/lib/use-run";
@@ -274,16 +275,6 @@ function writeStepParam(stepId: string | null): void {
   if (stepId) url.searchParams.set("step", stepId);
   else url.searchParams.delete("step");
   window.history.replaceState(null, "", url);
-}
-
-/** The report as a file: the goal as a heading, the answer, then the sources the run used. */
-function reportMarkdown(goal: string | null, output: string, sources: { title: string; url: string }[]): string {
-  const head = goal ? `# ${goal}\n\n` : "";
-  // Only real web links become markdown links, the same rule the page applies.
-  const linkable = sources.filter((s) => webUrl(s.url));
-  const list = linkable.map((s, i) => `${i + 1}. [${s.title}](${s.url})`).join("\n");
-  const cited = linkable.length > 0 ? `\n\n## Sources this run used\n\n${list}\n` : "";
-  return `${head}${output.trim()}${cited}`;
 }
 
 function HeaderStat({ label, value }: { label: string; value: React.ReactNode }) {
