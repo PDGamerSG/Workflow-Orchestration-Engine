@@ -1,6 +1,6 @@
 # Design notes
 
-Relay is a durable workflow engine for LLM agents. You give it a goal. A planner model turns the goal into a graph of steps, the engine runs independent steps in parallel, and every result lands in SQLite. If the process dies, another process picks the run up and continues from the last finished step. A Next.js dashboard draws the graph and updates it live.
+Relay is a durable workflow engine for LLM agents. You give it a goal. A planner model turns the goal into a graph of steps, the engine runs independent steps in parallel, and every result lands in Postgres. If the function or process driving a run dies, another one picks the run up and continues from the last finished step. Everything runs inside one Next.js app, so it deploys to Vercel with a Neon database and no separate backend.
 
 ## Problem
 
@@ -20,18 +20,19 @@ Single-agent loops (ReAct style) have a second problem. They do one thing at a t
 
 - Human approval or pause-for-input steps.
 - Arbitrary code or HTTP steps. Every step is a model call.
-- Multi-tenant auth. The dashboard runs locally.
-- Distributed execution across machines. Several engine processes can share one SQLite file on one machine.
+- Multi-tenant auth.
+- Long-lived workers. The engine runs inside request handlers and needs no process of its own.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-  subgraph web [web: Next.js]
+  subgraph web [web: Next.js on Vercel]
     UI[Run list and run view]
+    ROUTE["/api route handler"]
   end
-  subgraph server [server: Bun + Express]
-    API[REST + SSE]
+  subgraph server [server: engine package]
+    API[Fetch-style API]
     PL[Planner]
     SCH[Scheduler]
     LSE[Lease manager]
@@ -39,11 +40,10 @@ flowchart LR
     CACHE[Step cache]
     LLM[LlmProvider]
   end
-  DB[(SQLite, WAL)]
-  G[Gemini API]
+  DB[(Postgres: Neon, or PGlite locally)]
+  G[Model API]
 
-  UI -- fetch --> API
-  UI -- EventSource --> API
+  UI -- fetch and poll --> ROUTE --> API
   API --> PL --> LLM
   API --> SCH
   SCH --> RL --> LLM --> G
@@ -55,10 +55,10 @@ flowchart LR
 
 The repo has two Bun workspaces.
 
-- `server/` owns all state. It is the only thing that talks to SQLite and Gemini.
-- `web/` is a Next.js App Router app. It holds no state of its own and reads everything from the server over HTTP.
+- `server/` is the engine as a library: store, scheduler, planner, providers, and the HTTP API as a `(Request) => Response` handler. It is the only code that talks to the database and the model.
+- `web/` is a Next.js App Router app. One catch-all route, `app/api/[...path]/route.ts`, hands every `/api` request to the engine's handler. The pages hold no state of their own and read everything through `/api`.
 
-Runs can take minutes, and a Next.js dev reload restarts the web process. Keeping the engine separate means a reload does not kill a run.
+On Vercel each request runs in a function with a 300 second limit. Starting a run launches it in the background and keeps the function alive with `after()` until the run settles. A run that outlives the limit loses its function, its lease expires, and the next request picks it up (see leases below).
 
 ## Workflow definition
 
@@ -104,7 +104,7 @@ A path that does not exist in the JSON output fails the step with a `TemplateErr
 
 ## Data model
 
-SQLite through `bun:sqlite`, with `journal_mode=WAL` and `busy_timeout=5000` so several processes can share the file.
+Postgres. Production uses Neon through node-postgres with Neon's pooled connection string. Without `DATABASE_URL` the engine runs PGlite, Postgres compiled to WebAssembly, in `data/pglite`, so local development and tests need no database server. The store creates its tables on first use. Timestamps are epoch milliseconds in `BIGINT` columns.
 
 ```sql
 runs (
@@ -118,15 +118,15 @@ runs (
   concurrency INTEGER NOT NULL,
   max_replans INTEGER NOT NULL,
   replans INTEGER NOT NULL DEFAULT 0,
-  budget_tokens INTEGER,
-  budget_usd REAL,
-  planning_input_tokens INTEGER NOT NULL DEFAULT 0,   -- planner and replanner calls
-  planning_output_tokens INTEGER NOT NULL DEFAULT 0,
-  planning_cost_usd REAL NOT NULL DEFAULT 0,
+  budget_tokens BIGINT,
+  budget_usd DOUBLE PRECISION,
+  planning_input_tokens BIGINT NOT NULL DEFAULT 0,   -- planner and replanner calls
+  planning_output_tokens BIGINT NOT NULL DEFAULT 0,
+  planning_cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
   lease_owner TEXT,
-  lease_expires_at INTEGER,     -- epoch ms
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  lease_expires_at BIGINT,      -- epoch ms
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
 )
 
 steps (
@@ -139,35 +139,35 @@ steps (
   output TEXT,
   sources_json TEXT,
   error TEXT,
-  input_tokens INTEGER NOT NULL DEFAULT 0,
-  output_tokens INTEGER NOT NULL DEFAULT 0,
+  input_tokens BIGINT NOT NULL DEFAULT 0,
+  output_tokens BIGINT NOT NULL DEFAULT 0,
   search_calls INTEGER NOT NULL DEFAULT 0,
-  cost_usd REAL NOT NULL DEFAULT 0,
-  cached INTEGER NOT NULL DEFAULT 0,
-  started_at INTEGER,
-  finished_at INTEGER,
+  cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+  cached BOOLEAN NOT NULL DEFAULT FALSE,
+  started_at BIGINT,
+  finished_at BIGINT,
   PRIMARY KEY (run_id, step_id)
 )
 
 events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   run_id TEXT NOT NULL,
   type TEXT NOT NULL,
   payload_json TEXT NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at BIGINT NOT NULL
 )
 
 step_cache (
   key TEXT PRIMARY KEY,         -- sha256 of model, resolved prompt, tools, output schema
   output TEXT NOT NULL,
   sources_json TEXT,
-  created_at INTEGER NOT NULL
+  created_at BIGINT NOT NULL
 )
 ```
 
 Token counts and cost live only on `steps`. Run totals come from `SUM` over the run's steps, so the two can never disagree. Tokens from failed attempts are added to the step as they happen, because failed calls still cost money.
 
-Every state change and its event are written in one transaction. The event id is the SSE event id.
+Every state change and its event are written in one transaction, and that transaction first takes the run's row lock with `SELECT ... FOR UPDATE`. Writes to one run are therefore serialized across functions, and its events get ids in commit order. The event id is the cursor the dashboard polls from.
 
 ### Event types
 
@@ -191,7 +191,7 @@ stateDiagram-v2
 
 ### Scheduling
 
-The scheduler for one run keeps an in-memory view of the step table, loaded from SQLite when it starts.
+The scheduler for one run keeps an in-memory view of the step table, loaded from the database when it starts.
 
 1. A step is ready when it is `pending` and every dependency is `succeeded`.
 2. While fewer than `concurrency` steps are in flight and the ready set is not empty, it takes the ready step that comes first in topological order and launches it.
@@ -234,7 +234,7 @@ A run may set `budget_tokens`, `budget_usd`, or both. Before each launch the sch
 
 ### Rate limiting
 
-A token bucket with capacity `GEMINI_RPM / 6` that refills at `GEMINI_RPM / 60` tokens per second. Every run in the process shares it. `acquire(signal)` resolves in FIFO order and rejects if the signal aborts while waiting.
+A token bucket with capacity `LLM_RPM / 6` that refills at `LLM_RPM / 60` tokens per second. Every run in the process shares it. On Vercel each function instance has its own bucket, so several busy instances can together go over the limit; the retry path handles the 429s that follow. `acquire(signal)` resolves in FIFO order and rejects if the signal aborts while waiting.
 
 ### Step cache
 
@@ -242,13 +242,13 @@ The key is `sha256(JSON.stringify([model, resolvedPrompt, tools, outputSchema]))
 
 ### Leases, crash recovery, and multiple processes
 
-Each engine process gets a `workerId` (a random UUID) at start.
+Each engine instance gets a `workerId` (a random UUID) when it starts. On Vercel that is one per function instance.
 
 - **Claim.** `UPDATE runs SET lease_owner=?, lease_expires_at=now+30s WHERE id=? AND status IN ('planning','running') AND (lease_owner IS NULL OR lease_expires_at < now)`. The process drives the run only if the update changed one row. A run claimed while `planning` is planned again from the start.
-- **Heartbeat.** Every 10 seconds the owner extends the lease with `WHERE id=? AND lease_owner=?`. If that changes zero rows, another process took the run. The owner aborts its scheduler and drops its in-flight results without writing them.
-- **Sweeper.** Every 5 seconds, and once at startup, each process looks for `running` runs with no live lease and claims them. A claimed run resets its `running` steps to `pending`, keeping their attempt counts, and emits `run.lease_taken`.
+- **Heartbeat.** While an instance drives at least one run, every 10 seconds it extends the lease with `WHERE id=? AND lease_owner=?`. If that changes zero rows, another process took the run. The owner aborts its scheduler and drops its in-flight results without writing them.
+- **Sweeper.** A serverless instance runs no timers between requests, so the API route sweeps instead: at most every 5 seconds per instance, a request looks for `planning` and `running` runs with no live lease and claims them. The dashboard polls while someone watches a run, so a run left behind by a dead function resumes within about one lease period. A claimed run resets its `running` steps to `pending`, keeping their attempt counts, and emits `run.lease_taken`. `Engine.start()` still sweeps on a timer for a long-running process.
 - **Fencing.** Every owner write includes `AND EXISTS (SELECT 1 FROM runs WHERE id=? AND lease_owner=? AND status IN ('planning','running'))`. A stale owner that wakes up after losing its lease cannot overwrite the new owner's work. Because the fence also checks status, a cancel written by any process blocks the owner's writes at once, and the owner's next heartbeat aborts its in-flight calls.
-- **Graceful shutdown.** On SIGINT or SIGTERM the process stops claiming, aborts in-flight calls, resets its running steps to `pending`, clears its leases, and exits. Another process, or the next start, resumes right away without waiting 30 seconds.
+- **Graceful shutdown.** `engine.stop()` stops claiming, aborts in-flight calls, resets its running steps to `pending`, and clears its leases, so another instance resumes right away without waiting 30 seconds. A function killed at its time limit gets no such chance; that is the crash case above.
 
 This gives at-least-once execution per step. A step killed in the middle of a model call runs again, which is acceptable for model calls because they have no side effects. A succeeded step never runs again.
 
@@ -291,6 +291,8 @@ interface LlmProvider {
 }
 ```
 
+`OpenAiCompatibleProvider` covers Groq, Cerebras and OpenRouter, which serve free models through the OpenAI chat completions format. It sends a JSON schema as `response_format`, reads `usage.prompt_tokens` and `usage.completion_tokens`, and turns a `Retry-After` header into `retryAfterMs`. These APIs have no search tool, so search is off when one of them is configured.
+
 `GeminiProvider` maps `usageMetadata.promptTokenCount` plus `toolUsePromptTokenCount` to input tokens, and `candidatesTokenCount` plus `thoughtsTokenCount` to output tokens. It reads `groundingMetadata.groundingChunks[].web` for sources and counts `webSearchQueries.length > 0` as one search call. Errors turn into `LlmError { status, retryAfterMs }`.
 
 Default pricing for `gemini-3.5-flash` is $1.50 per 1M input tokens, $9.00 per 1M output tokens, and $14 per 1,000 search calls. `PRICE_INPUT_PER_M`, `PRICE_OUTPUT_PER_M`, and `PRICE_SEARCH_PER_K` override them.
@@ -308,10 +310,10 @@ Next.js App Router with Tailwind, `@xyflow/react` for the graph, `@dagrejs/dagre
   - A side panel for the selected step: resolved prompt, output (markdown or JSON), sources as links, attempts, error, tokens, and cost.
   - Tabs for the final report and the event timeline.
 
-Live updates use one `EventSource` per page. A reducer applies each event to the run state. `EventSource` reconnects on its own and sends `Last-Event-ID`, so no events go missing.
+Live updates poll `GET /api/runs/:id/events?after=<last id>` every second while the run is going and every 10 seconds once it has finished. A reducer applies each event to the run state. Each poll starts after the last event received, so no event goes missing or applies twice. Polling suits serverless better than a stream: a stream would hold a function open for as long as the page stays open.
 
 ## Benchmark and demos
 
 `bun run bench` runs a 12-step research-shaped graph on `FakeProvider` with fixed per-step latency, at 1, 2, 4 and 8 steps at once, and compares Relay's scheduler with the level-by-level approach on a mixed-latency graph. It writes `docs/benchmark.md`.
 
-`bun run demo:crash` starts two engine processes on one database, kills the first mid-step, and checks that the second finishes the run without repeating a finished step.
+`bun run demo:crash` starts two engines on one database, stops the first mid-step without any cleanup, the way a function dies at its time limit, and checks that the second finishes the run without repeating a finished step.

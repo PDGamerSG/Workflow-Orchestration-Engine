@@ -1,6 +1,6 @@
 # Relay
 
-A durable workflow engine for LLM agents. Describe a goal, and a planner model turns it into a graph of steps. The engine runs independent steps in parallel, saves every result to SQLite, and picks the run back up after a crash without repeating finished work. A dashboard draws the graph and fills it in live.
+A durable workflow engine for LLM agents. Describe a goal, and a planner model turns it into a graph of steps. The engine runs independent steps in parallel, saves every result to Postgres, and picks the run back up after a crash without repeating finished work. A dashboard draws the graph and fills it in live. It is one Next.js app with no separate backend: it deploys to Vercel with a free Neon database and runs on free models from Groq, Cerebras or OpenRouter.
 
 ![The run view: a graph of finished steps, the selected step's output and cost, and the event timeline](docs/images/run-view.png)
 
@@ -8,10 +8,10 @@ A durable workflow engine for LLM agents. Describe a goal, and a planner model t
 
 - Starts each step as soon as its inputs are ready, instead of waiting for a whole level. On a graph with one slow branch that is 3.83 s against 4.65 s for level by level.
 - Passes results between steps with templates: `{{step_id.output}}`, `{{step_id.output.field[0]}}` for JSON steps, and `{{step_id.sources}}` for search citations. A reference also adds the dependency, so you don't declare it twice.
-- Recovers from a crash. A worker holds each run through a lease it renews every few seconds. If the worker dies, another one claims the run once the lease expires, resets the steps that were in flight, and keeps everything that already finished.
+- Recovers from a crash. The function driving a run holds it through a lease it renews every few seconds. If that function dies, for example at Vercel's time limit, the next request claims the run once the lease expires, resets the steps that were in flight, and keeps everything that already finished.
 - Re-plans a failed branch. When a step runs out of retries, the planner writes replacement steps and the engine points the downstream steps at them.
 - Tracks cost per attempt: input and output tokens, search calls, USD. A run can have a token or dollar budget, and no new steps start once it's spent.
-- Streams progress to the dashboard over server-sent events.
+- Updates the dashboard live by polling for new events after the last one it has.
 
 ## The dashboard
 
@@ -26,7 +26,7 @@ bun install
 LLM_PROVIDER=demo bun run dev
 ```
 
-Open http://localhost:3000. The engine listens on http://localhost:4000.
+Open http://localhost:3000. The dashboard and its API (`/api`) are one app. Without `DATABASE_URL` it stores runs in PGlite, an in-process Postgres, under `web/data/pglite`, so no database server is needed locally.
 
 To use a real model, pick a provider and put its key in `.env` at the repo root (see `.env.example`). Groq, Cerebras and OpenRouter all have free models and need nothing but a key:
 
@@ -48,43 +48,35 @@ Only Gemini has a search tool. With the other providers, and with `SEARCH_ENABLE
 
 ## Deploy
 
-The repo has a `Dockerfile` that runs the engine and the dashboard in one container. The dashboard listens on `$PORT` and forwards `/api` to the engine inside the container, so any host that runs a Docker image and exposes one port will do.
-
-On [Render](https://render.com), with its free plan:
+The app deploys to [Vercel](https://vercel.com) as it is, with [Neon](https://neon.com) for the database. Both have free plans that do not sleep: Neon pauses its compute after a few idle minutes and wakes on the next query in well under a second.
 
 1. Push the repo to GitHub.
-2. In the Render dashboard, choose **New > Blueprint** and pick the repository. Render reads `render.yaml`.
-3. Paste your `GROQ_API_KEY` when Render asks for it, then deploy.
+2. In Vercel, choose **Add New > Project**, import the repository, and set **Root Directory** to `web`. Vercel detects Next.js and installs the Bun workspace from the repo root.
+3. Under **Environment Variables**, add `LLM_PROVIDER=groq` and your `GROQ_API_KEY` (or another provider from the table above).
+4. Deploy, then open the project's **Storage** tab, choose **Create Database > Neon**, and connect it to the project. That adds `DATABASE_URL`. Redeploy so the functions pick it up. The tables are created on the first request.
 
-The site comes up at `https://<service-name>.onrender.com`. To use another provider, change `LLM_PROVIDER` and add its key under the service's **Environment** tab.
+The site is live at `https://<project>.vercel.app`.
 
-Things to know about the free plan: the service sleeps after 15 minutes without traffic and takes about a minute to wake, and its disk is wiped on every deploy and restart, so run history does not survive them. A paid instance with a persistent disk mounted at `/app/data` keeps it.
-
-To try the image locally:
-
-```bash
-docker build -t relay .
-docker run -p 3000:3000 -e LLM_PROVIDER=groq -e GROQ_API_KEY=your-key relay
-```
+How a run fits in a serverless function: starting a run launches it inside the request's function, and `after()` keeps the function alive until the run settles, up to Vercel's 300 second limit on the Hobby plan. A run that goes longer loses its function. Its lease expires 30 seconds later, and the next request to `/api`, which the dashboard sends every second while you watch a run, takes it over and continues from the last finished step. A run left alone with nobody watching waits for the next visit.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-  subgraph web [web: Next.js dashboard]
+  subgraph web [web: Next.js app on Vercel]
     UI[Run list, live graph, step panel]
+    ROUTE["/api route"]
   end
-  subgraph server [server: Bun engine]
-    API[REST + SSE]
+  subgraph server [server: engine package]
+    API[HTTP handler]
     PL[Planner]
     SCH[Scheduler]
     LSE[Leases and sweeper]
     LLM[Model provider: Gemini, Groq, Cerebras, OpenRouter or demo]
   end
-  DB[(SQLite, WAL)]
+  DB[(Postgres: Neon, or PGlite locally)]
 
-  UI -- fetch --> API
-  UI -- EventSource --> API
+  UI -- fetch and poll --> ROUTE --> API
   API --> PL --> LLM
   API --> SCH --> LLM
   SCH --> DB
@@ -98,7 +90,7 @@ flowchart LR
 
 **Failure handling.** Timeouts, 429s, 5xx and JSON that does not match a step's schema are retried with exponential backoff and jitter, and a 429 that carries a retry delay waits exactly that long. Bad requests and template errors fail immediately. A step that runs out of attempts either gets replaced by a re-plan or skips its descendants while other branches continue.
 
-**Durability.** Every state change and its event commit in one SQLite transaction, and the event id doubles as the SSE cursor, so a reconnecting browser replays exactly what it missed. Writes by a run's owner are fenced: they only apply while that worker still holds the lease and the run is still active. A cancel from any process therefore stops the owner's writes at once.
+**Durability.** Every state change and its event commit in one Postgres transaction that holds the run's row lock, and the event id doubles as the dashboard's polling cursor, so it picks up exactly what it has not seen. Writes by a run's owner are fenced: they only apply while that worker still holds the lease and the run is still active. A cancel from any function therefore stops the owner's writes at once.
 
 This gives at-least-once execution per step. A step killed mid-call runs again, which is safe here because a model call has no side effects. A step that already succeeded never runs again.
 
@@ -108,10 +100,10 @@ This gives at-least-once execution per step. A step killed mid-call runs again, 
 cd server && bun run demo:crash
 ```
 
-It starts two worker processes on one database, kills the first mid-step, and lets the second take over:
+It starts two engines on one database, stops the first mid-step with no cleanup, the way a function dies at its time limit, and lets the second take over:
 
 ```
-[demo] killed worker A after step_1, step_2, step_3 finished
+[demo] worker A died after step_1, step_2, step_3 finished
 [demo] worker B waits for A's 4 s lease to expire, then takes over
 [demo] run succeeded 6.8 s after worker B started
 
@@ -127,16 +119,18 @@ final attempts per step:    step_1=1 step_2=1 step_3=1 step_4=2 step_5=1 step_6=
 
 ## HTTP API
 
+The routes live under `/api`.
+
 | Method and path | What it does |
 |---|---|
 | `POST /runs` | Starts a run from `{ goal, profile }` or `{ graph }`, plus optional `concurrency`, `maxReplans` and `budget`. Returns `{ runId }` at once. |
 | `GET /runs` | Recent runs with step counts and totals. |
 | `GET /runs/:id` | The run, its steps, totals, and the id of the last event they include. |
-| `GET /runs/:id/events` | Server-sent events, replayed from `Last-Event-ID` or `?after=`. |
-| `POST /runs/:id/cancel` | Cancels a planning or running run from any worker process. |
+| `GET /runs/:id/events?after=` | Up to 500 events after the given event id, oldest first. The dashboard polls this. |
+| `POST /runs/:id/cancel` | Cancels a planning or running run, whichever function drives it. |
 | `POST /runs/:id/retry` | Re-runs the failed and skipped steps of a failed run. |
 | `DELETE /runs/:id` | Removes a finished run with its steps and events. An unfinished run has to be cancelled first. |
-| `GET /health` | Liveness, the worker id, and the process id. |
+| `GET /health` | Liveness and the worker id. |
 
 Errors are always `{ "error": { "code", "message", "issues"? } }`, and an invalid graph comes back with every validation issue.
 
@@ -158,7 +152,7 @@ A hand-written graph looks like this:
 
 ## Configuration
 
-Set these in `.env` at the repo root.
+Set these in `.env` at the repo root for local development, and under the project's Environment Variables on Vercel.
 
 | Variable | Default | Notes |
 |---|---|---|
@@ -169,21 +163,20 @@ Set these in `.env` at the repo root.
 | `SEARCH_ENABLED` | `true` | Gemini only. Turn off for keys without grounding quota |
 | `DEMO_FAILURE_RATE` | `0` | With `LLM_PROVIDER=demo`, the share of step calls that fail like an overloaded API. Planner calls never fail, so retries, re-plans and skips can be watched without a key |
 | `LEASE_TTL_MS` | `30000` | How long a dead worker's runs wait before another claims them |
-| `DATABASE_PATH` | `data/relay.db` | |
-| `PORT` | `4000` | |
-| `WEB_ORIGIN` | `http://localhost:3000` | Allowed origin for the dashboard |
+| `DATABASE_URL` | | Postgres connection string. Use Neon's pooled one. Required on Vercel |
+| `PGLITE_DIR` | `data/pglite` | Where runs are stored when `DATABASE_URL` is not set |
 | `PRICE_INPUT_PER_M`, `PRICE_OUTPUT_PER_M`, `PRICE_SEARCH_PER_K` | Gemini 3.5 Flash list prices, or `0` for the free providers | Used for cost tracking |
-
-The Docker image sets `ENGINE_PORT` for the engine and builds the dashboard with `NEXT_PUBLIC_API_URL=/api` and `ENGINE_URL=http://127.0.0.1:4000`.
 
 ## Layout
 
 ```
-server/src/engine     graph validation, templates, store, scheduler, engine, leases
+server/src/engine     graph validation, templates, Postgres store, scheduler, engine, leases
 server/src/planner    goal to graph, research profile, re-planning
 server/src/llm        provider interface, Gemini, OpenAI-compatible APIs, demo provider, pricing
-server/src/api        REST routes and the event stream
+server/src/api        HTTP routes as a fetch-style handler
+server/src/relay.ts   builds the engine from the environment
 server/scripts        benchmark and crash recovery demo
+web/app/api          the catch-all route that runs the engine
 web/lib               API client, run state reducer, graph layout, step selection
 web/components        graph, step panel, timeline, forms
 docs/design.md        design notes: data model, leases, re-planning
@@ -196,11 +189,13 @@ bun run test
 bun run typecheck
 ```
 
-The engine tests run two `Engine` instances on one database file to test lease takeover, fencing and crash recovery. A fake provider stands in for the model, so the tests need no API key or network.
+The engine tests run two `Engine` instances on one database to test lease takeover, fencing and crash recovery. They use an in-memory PGlite, and a fake provider stands in for the model, so they need no database server, API key or network. `TEST_DATABASE_URL=postgres://...` runs the same tests against a real Postgres server; CI does both.
 
 ## Design decisions
 
-SQLite instead of a queue and a worker pool. It's one file and no extra services, and WAL lets several processes share it. The leases and fenced writes already guarantee that one worker drives a run and a stale worker can't write. Moving to Postgres would change the store, not the scheduler.
+Postgres instead of a queue and a worker pool. Leases and fenced writes already guarantee that one worker drives a run and a stale worker can't write, so the database is the only shared piece. That is what lets the engine run inside serverless functions: any instance can pick up any run.
+
+Polling instead of a stream. A server-sent event stream would keep a function running for as long as a page stays open. A poll is one short query, and the dashboard slows down once a run has finished.
 
 At-least-once, not exactly-once. A step interrupted mid-call runs again, because the engine can't know whether the model answered. That's fine for model calls since they have no side effects. A step with side effects would need an idempotency key.
 
@@ -212,5 +207,5 @@ Budgets stop new steps, not running ones. Checking before each launch is cheap. 
 
 - One model per process. Other APIs need an `LlmProvider` implementation unless they speak the OpenAI chat completions format.
 - Steps are model calls. There are no HTTP or code steps.
-- Several processes can share one machine's database file, not several machines.
+- A run longer than the function limit (300 s on Vercel Hobby) only continues while someone has the dashboard open, since requests are what resume it.
 - No auth. Anyone with the link to a deployment can start, cancel and delete runs, and every run spends the deployment's API quota.
