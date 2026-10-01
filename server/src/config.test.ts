@@ -5,7 +5,8 @@ describe("loadConfig", () => {
   test("fills defaults", () => {
     expect(loadConfig({ GOOGLE_API_KEY: "k" })).toEqual({
       provider: "gemini",
-      googleApiKey: "k",
+      apiKey: "k",
+      baseUrl: undefined,
       model: "gemini-3.5-flash",
       rpm: 60,
       searchEnabled: true,
@@ -24,7 +25,29 @@ describe("loadConfig", () => {
   });
 
   test("requires an API key for gemini", () => {
-    expect(() => loadConfig({})).toThrow(/GOOGLE_API_KEY is required/);
+    expect(() => loadConfig({})).toThrow(/GOOGLE_API_KEY: required/);
     expect(() => loadConfig({ GOOGLE_API_KEY: "k", PORT: "abc" })).toThrow(/PORT/);
+  });
+
+  test("fills free-tier defaults for an OpenAI-compatible provider", () => {
+    expect(loadConfig({ LLM_PROVIDER: "groq", GROQ_API_KEY: "gk" })).toMatchObject({
+      provider: "groq",
+      apiKey: "gk",
+      baseUrl: "https://api.groq.com/openai/v1",
+      model: "openai/gpt-oss-120b",
+      rpm: 30,
+      searchEnabled: false,
+      pricing: { inputPerM: 0, outputPerM: 0, searchPerK: 0 },
+    });
+  });
+
+  test("lets LLM_MODEL and LLM_RPM override the provider defaults", () => {
+    const config = loadConfig({ LLM_PROVIDER: "openrouter", OPENROUTER_API_KEY: "ok", LLM_MODEL: "openrouter/free", LLM_RPM: "10" });
+    expect(config).toMatchObject({ baseUrl: "https://openrouter.ai/api/v1", model: "openrouter/free", rpm: 10 });
+  });
+
+  test("requires the key of the chosen provider", () => {
+    expect(() => loadConfig({ LLM_PROVIDER: "cerebras", GROQ_API_KEY: "gk" })).toThrow(/CEREBRAS_API_KEY: required/);
+    expect(loadConfig({ LLM_PROVIDER: "demo" }).apiKey).toBeUndefined();
   });
 });

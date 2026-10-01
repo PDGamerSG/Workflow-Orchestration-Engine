@@ -6,6 +6,7 @@ import { Engine } from "./engine/engine";
 import { Store } from "./engine/store";
 import { createDemoProvider } from "./llm/demo";
 import { GeminiProvider } from "./llm/gemini";
+import { OpenAiCompatibleProvider } from "./llm/openai-compatible";
 import type { LlmProvider } from "./llm/provider";
 import { Planner } from "./planner/planner";
 
@@ -18,8 +19,10 @@ const store = new Store(databasePath);
 
 const provider: LlmProvider =
   config.provider === "gemini"
-    ? new GeminiProvider({ apiKey: config.googleApiKey!, model: config.model })
-    : createDemoProvider({ failureRate: config.demoFailureRate });
+    ? new GeminiProvider({ apiKey: config.apiKey!, model: config.model })
+    : config.provider === "demo"
+      ? createDemoProvider({ failureRate: config.demoFailureRate })
+      : new OpenAiCompatibleProvider({ baseUrl: config.baseUrl!, apiKey: config.apiKey!, model: config.model });
 
 const planner = new Planner(provider, { searchEnabled: config.searchEnabled });
 const engine = new Engine({
@@ -37,7 +40,7 @@ const app = createApp({ engine, store, webOrigin: config.webOrigin });
 
 engine.start();
 const server = app.listen(config.port, () => {
-  console.log(`[relay] worker ${engine.workerId} on http://localhost:${config.port} (provider: ${provider.model}, search: ${config.searchEnabled ? "on" : "off"}, db: ${databasePath})`);
+  console.log(`[relay] worker ${engine.workerId} on http://localhost:${config.port} (provider: ${config.provider}/${provider.model}, search: ${config.searchEnabled ? "on" : "off"}, db: ${databasePath})`);
 });
 
 let shuttingDown = false;
