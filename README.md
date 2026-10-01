@@ -28,17 +28,44 @@ LLM_PROVIDER=demo bun run dev
 
 Open http://localhost:3000. The engine listens on http://localhost:4000.
 
-To use Gemini, put a key in `.env` at the repo root (see `.env.example`):
+To use a real model, pick a provider and put its key in `.env` at the repo root (see `.env.example`). Groq, Cerebras and OpenRouter all have free models and need nothing but a key:
 
 ```bash
-GOOGLE_API_KEY=your-key
-# The Gemini free tier allows 5 requests per minute. Matching it here avoids 429s.
-GEMINI_RPM=5
+LLM_PROVIDER=groq
+GROQ_API_KEY=your-key
 ```
 
-Then `bun run dev`.
+| `LLM_PROVIDER` | Key | Default model | Free-tier requests per minute |
+|---|---|---|---|
+| `groq` | `GROQ_API_KEY` from [console.groq.com](https://console.groq.com/keys) | `openai/gpt-oss-120b` | 30 |
+| `cerebras` | `CEREBRAS_API_KEY` from [cloud.cerebras.ai](https://cloud.cerebras.ai) | `gpt-oss-120b` | 30 |
+| `openrouter` | `OPENROUTER_API_KEY` from [openrouter.ai](https://openrouter.ai/keys) | `nvidia/nemotron-3-super-120b-a12b:free` | 20 |
+| `gemini` | `GOOGLE_API_KEY` from [AI Studio](https://aistudio.google.com/apikey) | `gemini-3.5-flash` | 5 on the free tier, so set `LLM_RPM=5` |
 
-If your key has no Google Search grounding quota, set `SEARCH_ENABLED=false`. Research runs then answer from model knowledge, and the prompts tell the writer not to make up citations.
+Then `bun run dev`. `LLM_MODEL` picks another model from the same provider, for example `openai/gpt-oss-20b` on Groq or any `:free` model on OpenRouter that supports structured outputs.
+
+Only Gemini has a search tool. With the other providers, and with `SEARCH_ENABLED=false` on Gemini, research runs answer from model knowledge, and the prompts tell the writer not to make up citations.
+
+## Deploy
+
+The repo has a `Dockerfile` that runs the engine and the dashboard in one container. The dashboard listens on `$PORT` and forwards `/api` to the engine inside the container, so any host that runs a Docker image and exposes one port will do.
+
+On [Render](https://render.com), with its free plan:
+
+1. Push the repo to GitHub.
+2. In the Render dashboard, choose **New > Blueprint** and pick the repository. Render reads `render.yaml`.
+3. Paste your `GROQ_API_KEY` when Render asks for it, then deploy.
+
+The site comes up at `https://<service-name>.onrender.com`. To use another provider, change `LLM_PROVIDER` and add its key under the service's **Environment** tab.
+
+Things to know about the free plan: the service sleeps after 15 minutes without traffic and takes about a minute to wake, and its disk is wiped on every deploy and restart, so run history does not survive them. A paid instance with a persistent disk mounted at `/app/data` keeps it.
+
+To try the image locally:
+
+```bash
+docker build -t relay .
+docker run -p 3000:3000 -e LLM_PROVIDER=groq -e GROQ_API_KEY=your-key relay
+```
 
 ## How it works
 
@@ -52,7 +79,7 @@ flowchart LR
     PL[Planner]
     SCH[Scheduler]
     LSE[Leases and sweeper]
-    LLM[Gemini or demo provider]
+    LLM[Model provider: Gemini, Groq, Cerebras, OpenRouter or demo]
   end
   DB[(SQLite, WAL)]
 
@@ -135,24 +162,26 @@ Set these in `.env` at the repo root.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `GOOGLE_API_KEY` | | Required unless `LLM_PROVIDER=demo` |
-| `LLM_PROVIDER` | `gemini` | `demo` replies without a key |
-| `GEMINI_MODEL` | `gemini-3.5-flash` | |
-| `GEMINI_RPM` | `60` | Shared token bucket for every run in the process |
-| `SEARCH_ENABLED` | `true` | Turn off for keys without grounding quota |
+| `LLM_PROVIDER` | `gemini` | `gemini`, `groq`, `cerebras`, `openrouter`, or `demo`, which replies without a key |
+| `GOOGLE_API_KEY`, `GROQ_API_KEY`, `CEREBRAS_API_KEY`, `OPENROUTER_API_KEY` | | Only the chosen provider's key is required |
+| `LLM_MODEL` | The provider's default free model | `GEMINI_MODEL` still works for Gemini |
+| `LLM_RPM` | The provider's free-tier limit, or `60` for Gemini | Shared token bucket for every run in the process. `GEMINI_RPM` still works for Gemini |
+| `SEARCH_ENABLED` | `true` | Gemini only. Turn off for keys without grounding quota |
 | `DEMO_FAILURE_RATE` | `0` | With `LLM_PROVIDER=demo`, the share of step calls that fail like an overloaded API. Planner calls never fail, so retries, re-plans and skips can be watched without a key |
 | `LEASE_TTL_MS` | `30000` | How long a dead worker's runs wait before another claims them |
 | `DATABASE_PATH` | `data/relay.db` | |
 | `PORT` | `4000` | |
 | `WEB_ORIGIN` | `http://localhost:3000` | Allowed origin for the dashboard |
-| `PRICE_INPUT_PER_M`, `PRICE_OUTPUT_PER_M`, `PRICE_SEARCH_PER_K` | Gemini 3.5 Flash list prices | Used for cost tracking |
+| `PRICE_INPUT_PER_M`, `PRICE_OUTPUT_PER_M`, `PRICE_SEARCH_PER_K` | Gemini 3.5 Flash list prices, or `0` for the free providers | Used for cost tracking |
+
+The Docker image sets `ENGINE_PORT` for the engine and builds the dashboard with `NEXT_PUBLIC_API_URL=/api` and `ENGINE_URL=http://127.0.0.1:4000`.
 
 ## Layout
 
 ```
 server/src/engine     graph validation, templates, store, scheduler, engine, leases
 server/src/planner    goal to graph, research profile, re-planning
-server/src/llm        provider interface, Gemini, demo provider, pricing
+server/src/llm        provider interface, Gemini, OpenAI-compatible APIs, demo provider, pricing
 server/src/api        REST routes and the event stream
 server/scripts        benchmark and crash recovery demo
 web/lib               API client, run state reducer, graph layout, step selection
@@ -181,7 +210,7 @@ Budgets stop new steps, not running ones. Checking before each launch is cheap. 
 
 ## Limits
 
-- One model provider. Anything else needs an `LlmProvider` implementation.
+- One model per process. Other APIs need an `LlmProvider` implementation unless they speak the OpenAI chat completions format.
 - Steps are model calls. There are no HTTP or code steps.
 - Several processes can share one machine's database file, not several machines.
-- No auth. The dashboard and API are meant to run locally, on a trusted machine.
+- No auth. Anyone with the link to a deployment can start, cancel and delete runs, and every run spends the deployment's API quota.
