@@ -1,56 +1,41 @@
-import { EventEmitter } from "node:events";
 import type { EventRow, Store } from "./store";
 import type { Clock } from "./types";
-
-/** Wakes SSE streams in this process as soon as an event is written. SQLite stays the source of truth. */
-export class EventBus {
-  private readonly emitter = new EventEmitter();
-
-  constructor() {
-    this.emitter.setMaxListeners(0);
-  }
-
-  publish(event: EventRow): void {
-    this.emitter.emit(event.runId, event);
-  }
-
-  subscribe(runId: string, listener: (event: EventRow) => void): () => void {
-    this.emitter.on(runId, listener);
-    return () => this.emitter.off(runId, listener);
-  }
-}
 
 export type PendingEvent = [type: string, payload: unknown];
 
 /**
- * Runs `mutate` and appends `events` in one transaction, then publishes the events.
- * If `mutate` returns false the transaction rolls back, nothing is published, and the result is null.
+ * Runs `mutate` and appends `events` in one transaction that holds the run's row lock.
+ * If `mutate` returns false the transaction rolls back and the result is null.
  */
-export function commit(
-  deps: { store: Store; bus: EventBus; clock: Clock },
+export async function commit(
+  deps: { store: Store; clock: Clock },
   runId: string,
-  mutate: () => boolean,
+  mutate: () => Promise<boolean>,
   events: PendingEvent[],
-): EventRow[] | null {
-  const { store, bus, clock } = deps;
+): Promise<EventRow[] | null> {
+  const { store, clock } = deps;
   const rolledBack = Symbol("rolled back");
-  let rows: EventRow[];
   try {
-    rows = store.tx(() => {
-      if (!mutate()) throw rolledBack;
-      const now = clock.now();
-      return events.map(([type, payload]) => ({
-        id: store.appendEvent(runId, type, payload, now),
-        runId,
-        type,
-        payload,
-        createdAt: now,
-      }));
-    });
+    return await store.tx(
+      async () => {
+        if (!(await mutate())) throw rolledBack;
+        const now = clock.now();
+        const rows: EventRow[] = [];
+        for (const [type, payload] of events) {
+          rows.push({ id: await store.appendEvent(runId, type, payload, now), runId, type, payload, createdAt: now });
+        }
+        return rows;
+      },
+      { lockRun: runId },
+    );
   } catch (err) {
     if (err === rolledBack) return null;
     throw err;
   }
-  for (const row of rows) bus.publish(row);
-  return rows;
+}
+
+/** True when `fn` returns true for every item, checked one at a time and stopping at the first false. */
+export async function everyInOrder<T>(items: T[], fn: (item: T) => Promise<boolean>): Promise<boolean> {
+  for (const item of items) if (!(await fn(item))) return false;
+  return true;
 }

@@ -9,6 +9,7 @@
  */
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { openPglite } from "../src/engine/db";
 import { Engine } from "../src/engine/engine";
 import { Store } from "../src/engine/store";
 import type { StepDef } from "../src/engine/types";
@@ -20,18 +21,19 @@ function latencyFor(id: string, table: Record<string, number>): number {
 }
 
 async function runGraph(steps: StepDef[], latency: Record<string, number>, concurrency: number): Promise<number> {
-  const store = new Store(":memory:");
+  const db = await openPglite();
+  const store = await Store.open(db);
   const provider = new FakeProvider((req) => ({ text: `done: ${req.prompt.slice(0, 20)}` }), {
     delayMs: (req) => latencyFor(req.prompt.split(" ")[0]!, latency),
   });
   const engine = new Engine({ store, provider, pricing: { inputPerM: 0, outputPerM: 0, searchPerK: 0 }, rpm: 1_000_000 });
   const started = performance.now();
-  const { runId } = engine.createRun({ graph: { steps }, concurrency });
+  const { runId } = await engine.createRun({ graph: { steps }, concurrency });
   await engine.whenSettled(runId);
   const elapsed = performance.now() - started;
-  const status = store.getRun(runId)!.status;
+  const status = (await store.getRun(runId))!.status;
   await engine.stop();
-  store.close();
+  await store.close();
   if (status !== "succeeded") throw new Error(`benchmark run ended ${status}`);
   return elapsed;
 }
@@ -100,7 +102,7 @@ console.log(`  relay: ${seconds(relayMs)}`);
 
 const report = `# Benchmark
 
-Simulated model latency, no network. Regenerate with \`bun run bench\` in \`server/\`. Each step's latency is fixed per step id, so every configuration runs the same workload. Timings include engine overhead: SQLite writes, events and scheduling.
+Simulated model latency, no network. Regenerate with \`bun run bench\` in \`server/\`. Each step's latency is fixed per step id, so every configuration runs the same workload. Timings include engine overhead: database writes (PGlite in memory), events and scheduling.
 
 ## Concurrency sweep
 

@@ -18,9 +18,9 @@ const EnvSchema = z.object({
   SEARCH_ENABLED: z.enum(["true", "false"]).default("true"),
   DEMO_FAILURE_RATE: z.coerce.number().min(0).max(1).default(0),
   LEASE_TTL_MS: z.coerce.number().int().min(1_000).default(30_000),
-  DATABASE_PATH: z.string().default("data/relay.db"),
-  PORT: z.coerce.number().int().min(0).max(65_535).default(4000),
-  WEB_ORIGIN: z.string().default("http://localhost:3000"),
+  DATABASE_URL: z.string().trim().optional(),
+  PGLITE_DIR: z.string().default("data/pglite"),
+  VERCEL: z.string().optional(),
   PRICE_INPUT_PER_M: z.coerce.number().nonnegative().optional(),
   PRICE_OUTPUT_PER_M: z.coerce.number().nonnegative().optional(),
   PRICE_SEARCH_PER_K: z.coerce.number().nonnegative().optional(),
@@ -36,9 +36,9 @@ export type Config = {
   searchEnabled: boolean;
   demoFailureRate: number;
   leaseTtlMs: number;
-  databasePath: string;
-  port: number;
-  webOrigin: string;
+  /** A Postgres connection string, such as Neon's pooled one. Without it the app uses PGlite in `pgliteDir`. */
+  databaseUrl: string | undefined;
+  pgliteDir: string;
   pricing: Pricing;
 };
 
@@ -63,6 +63,9 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
   if (key && !key.value) {
     throw new Error(`invalid configuration:\n  ${key.env}: required when LLM_PROVIDER=${provider} (set LLM_PROVIDER=demo to run without a key)`);
   }
+  if (e.VERCEL && !e.DATABASE_URL) {
+    throw new Error("invalid configuration:\n  DATABASE_URL: required on Vercel, whose file system is read-only (connect a Neon database)");
+  }
   const basePricing = provider === "gemini" ? GEMINI_FLASH_PRICING : FREE_PRICING;
   return {
     provider,
@@ -74,9 +77,8 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     searchEnabled: e.SEARCH_ENABLED === "true" && !compatible,
     demoFailureRate: e.DEMO_FAILURE_RATE,
     leaseTtlMs: e.LEASE_TTL_MS,
-    databasePath: e.DATABASE_PATH,
-    port: e.PORT,
-    webOrigin: e.WEB_ORIGIN,
+    databaseUrl: e.DATABASE_URL,
+    pgliteDir: e.PGLITE_DIR,
     pricing: {
       inputPerM: e.PRICE_INPUT_PER_M ?? basePricing.inputPerM,
       outputPerM: e.PRICE_OUTPUT_PER_M ?? basePricing.outputPerM,

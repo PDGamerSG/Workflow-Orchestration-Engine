@@ -2,7 +2,7 @@ import { Ajv, type ValidateFunction } from "ajv";
 import type { LlmProvider } from "../llm/provider";
 import { costUsd, type Pricing } from "../llm/pricing";
 import { cacheKey } from "./cache";
-import { commit, type EventBus, type PendingEvent } from "./events";
+import { commit, everyInOrder, type PendingEvent } from "./events";
 import { descendants } from "./graph";
 import type { TokenBucket } from "./rate-limiter";
 import { backoffMs, classifyError, OutputValidationError } from "./retry";
@@ -15,7 +15,6 @@ export type SchedulerDeps = {
   provider: LlmProvider;
   limiter: TokenBucket;
   clock: Clock;
-  bus: EventBus;
   workerId: string;
   pricing: Pricing;
   random?: () => number;
@@ -71,17 +70,17 @@ export class RunScheduler {
     signal.addEventListener("abort", stop, { once: true });
 
     try {
-      this.reload();
+      await this.reload();
       for (;;) {
         if (this.signal.aborted) break;
-        this.checkBudget();
+        await this.checkBudget();
         this.launchReady();
         if (this.inFlight.size === 0) break;
         await Promise.race(this.inFlight.values());
       }
       if (!this.signal.aborted) {
         await this.hookChain;
-        return this.finish();
+        return await this.finish();
       }
     } catch (err) {
       if (!(err instanceof LeaseLost)) throw err;
@@ -94,12 +93,12 @@ export class RunScheduler {
     return this.lost ? "lost" : "aborted";
   }
 
-  private reload() {
-    const run = this.deps.store.getRun(this.runId);
+  private async reload() {
+    const run = await this.deps.store.getRun(this.runId);
     if (!run?.graph) throw new Error(`run ${this.runId} has no graph`);
     this.runRow = run;
     this.graph = run.graph;
-    this.steps = new Map(this.deps.store.getSteps(this.runId).map((s) => [s.stepId, s]));
+    this.steps = new Map((await this.deps.store.getSteps(this.runId)).map((s) => [s.stepId, s]));
   }
 
   private def(id: string): NormalizedStep {
@@ -114,8 +113,7 @@ export class RunScheduler {
       if (row?.status !== "pending" || this.inFlight.has(id)) continue;
       if (!this.def(id).dependsOn.every((dep) => this.steps.get(dep)?.status === "succeeded")) continue;
 
-      // Mark the step running in memory before execute starts. A cache hit finishes synchronously,
-      // and its result must not be overwritten here afterwards.
+      // Mark the step running in memory before execute starts, so the next pass does not launch it again.
       this.steps.set(id, { ...row, status: "running" });
       const task = this.execute(id).finally(() => this.inFlight.delete(id));
       this.inFlight.set(id, task.catch((err) => this.onTaskError(err)));
@@ -129,20 +127,20 @@ export class RunScheduler {
     throw err;
   }
 
-  private checkBudget() {
+  private async checkBudget() {
     if (this.budgetExceeded) return;
     const { budgetTokens, budgetUsd } = this.runRow;
     if (budgetTokens === null && budgetUsd === null) return;
 
-    const totals = this.deps.store.totals(this.runId);
+    const totals = await this.deps.store.totals(this.runId);
     const overTokens = budgetTokens !== null && totals.inputTokens + totals.outputTokens >= budgetTokens;
     const overUsd = budgetUsd !== null && totals.costUsd >= budgetUsd;
     if (!overTokens && !overUsd) return;
 
     this.budgetExceeded = true;
     const pending = [...this.steps.values()].filter((s) => s.status === "pending").map((s) => s.stepId);
-    this.write(
-      () => pending.every((id) => this.patchStep(id, { status: "skipped", error: "budget exceeded" })),
+    await this.write(
+      () => everyInOrder(pending, (id) => this.patchStep(id, { status: "skipped", error: "budget exceeded" })),
       [
         ["run.budget_exceeded", { totals, budgetTokens, budgetUsd }],
         ...pending.map((stepId) => ["step.skipped", { stepId, reason: "budget exceeded" }] as PendingEvent),
@@ -163,24 +161,24 @@ export class RunScheduler {
       try {
         prompt = renderTemplate(def.prompt, this.templateContext());
       } catch (err) {
-        this.writeStarted(id, attempt, null);
+        await this.writeStarted(id, attempt, null);
         return this.fail(id, attempt, classifyError(err, false).reason);
       }
       if (rejection) {
         prompt += `\n\nYour previous answer was rejected: ${rejection}. Reply again with JSON that matches the schema.`;
       }
-      this.writeStarted(id, attempt, prompt);
+      await this.writeStarted(id, attempt, prompt);
 
       const schema = def.output.type === "json" ? def.output.schema : undefined;
       const key = def.cache ? cacheKey(this.deps.provider.model, prompt, def.tools, schema) : null;
-      const hit = key ? this.deps.store.cacheGet(key) : null;
+      const hit = key ? await this.deps.store.cacheGet(key) : null;
       if (hit) return this.succeed(id, attempt, hit.output, hit.sources, true);
 
       try {
         const result = await this.callProvider(def, prompt, schema);
-        this.recordUsage(id, result.usage);
+        await this.recordUsage(id, result.usage);
         if (schema) this.validateJson(def, result.text);
-        if (key) this.deps.store.cachePut(key, result.text, result.sources, this.deps.clock.now());
+        if (key) await this.deps.store.cachePut(key, result.text, result.sources, this.deps.clock.now());
         return this.succeed(id, attempt, result.text, result.sources, false);
       } catch (err) {
         if (err instanceof LeaseLost || this.signal.aborted) return;
@@ -190,7 +188,7 @@ export class RunScheduler {
         if (!classified.retryable || attempt > def.retries) return this.fail(id, attempt, classified.reason);
 
         const delayMs = classified.retryAfterMs ?? backoffMs(attempt, this.deps.random);
-        this.write(
+        await this.write(
           () => this.patchStep(id, { error: classified.reason }),
           [["step.retrying", { stepId: id, attempt, error: classified.reason, delayMs }]],
         );
@@ -259,18 +257,18 @@ export class RunScheduler {
     return { goal: this.runRow.goal, steps };
   }
 
-  private writeStarted(id: string, attempt: number, prompt: string | null) {
+  private async writeStarted(id: string, attempt: number, prompt: string | null) {
     const now = this.deps.clock.now();
-    this.write(
+    await this.write(
       () => this.patchStep(id, { status: "running", attempt, resolvedPrompt: prompt, error: null, startedAt: now, finishedAt: null }),
       [["step.started", { stepId: id, attempt, startedAt: now, prompt }]],
     );
   }
 
-  private recordUsage(id: string, usage: Usage) {
+  private async recordUsage(id: string, usage: Usage) {
     const cost = costUsd(usage, this.deps.pricing);
-    this.write(() => {
-      if (!this.deps.store.addStepUsage(this.runId, id, usage, cost, this.deps.workerId)) return false;
+    await this.write(async () => {
+      if (!(await this.deps.store.addStepUsage(this.runId, id, usage, cost, this.deps.workerId))) return false;
       const row = this.steps.get(id)!;
       this.steps.set(id, {
         ...row,
@@ -283,10 +281,10 @@ export class RunScheduler {
     }, []);
   }
 
-  private succeed(id: string, attempt: number, output: string, sources: StepRow["sources"], cached: boolean) {
+  private async succeed(id: string, attempt: number, output: string, sources: StepRow["sources"], cached: boolean) {
     if (this.signal.aborted) return;
     const now = this.deps.clock.now();
-    this.write(
+    await this.write(
       () => this.patchStep(id, { status: "succeeded", output, sources, cached, error: null, finishedAt: now }),
       [["step.succeeded", { stepId: id, attempt, output, sources, cached, finishedAt: now, usage: this.usageOf(id) }]],
     );
@@ -294,7 +292,7 @@ export class RunScheduler {
 
   private async fail(id: string, attempt: number, error: string) {
     const now = this.deps.clock.now();
-    this.write(
+    await this.write(
       () => this.patchStep(id, { status: "failed", error, finishedAt: now }),
       [["step.failed", { stepId: id, attempt, error, finishedAt: now, usage: this.usageOf(id) }]],
     );
@@ -302,7 +300,7 @@ export class RunScheduler {
     // Hooks run one at a time. Two branches failing together must not replan over each other.
     const replaced = await (this.hookChain = this.hookChain.then(async () => {
       if (!this.onStepFailed || this.signal.aborted) return false;
-      if (this.deps.store.getSteps(this.runId).find((s) => s.stepId === id)?.status !== "failed") return false;
+      if ((await this.deps.store.getSteps(this.runId)).find((s) => s.stepId === id)?.status !== "failed") return false;
       try {
         return await this.onStepFailed(id, error, this.signal);
       } catch (err) {
@@ -313,24 +311,24 @@ export class RunScheduler {
     if (this.signal.aborted) return;
 
     if (replaced) {
-      this.reload();
+      await this.reload();
       return;
     }
 
     const skip = [...descendants(this.graph, id)].filter((d) => this.steps.get(d)?.status === "pending");
     const reason = `upstream step "${id}" failed`;
-    this.write(
-      () => skip.every((d) => this.patchStep(d, { status: "skipped", error: reason })),
+    await this.write(
+      () => everyInOrder(skip, (d) => this.patchStep(d, { status: "skipped", error: reason })),
       skip.map((stepId) => ["step.skipped", { stepId, reason }]),
     );
   }
 
-  private finish(): SchedulerResult {
+  private async finish(): Promise<SchedulerResult> {
     // Anything still pending could never become ready. Close it out so the run has a clear end state.
     const stranded = [...this.steps.values()].filter((s) => s.status === "pending").map((s) => s.stepId);
     if (stranded.length) {
-      this.write(
-        () => stranded.every((id) => this.patchStep(id, { status: "skipped", error: "not reachable" })),
+      await this.write(
+        () => everyInOrder(stranded, (id) => this.patchStep(id, { status: "skipped", error: "not reachable" })),
         stranded.map((stepId) => ["step.skipped", { stepId, reason: "not reachable" }]),
       );
     }
@@ -345,8 +343,8 @@ export class RunScheduler {
           ? "budget exceeded"
           : failed.map((s) => `step "${s.stepId}" failed: ${s.error}`).join("; ") || "run did not complete";
 
-    const totals = this.deps.store.totals(this.runId);
-    this.write(
+    const totals = await this.deps.store.totals(this.runId);
+    await this.write(
       () => this.deps.store.setRunStatus(this.runId, status, error, this.deps.clock.now(), this.deps.workerId),
       [[`run.${status}`, { error, totals }]],
     );
@@ -359,8 +357,8 @@ export class RunScheduler {
   }
 
   /** Writes to the store and mirrors the change in memory. False when the lease is gone. */
-  private patchStep(id: string, patch: StepPatch): boolean {
-    if (!this.deps.store.updateStep(this.runId, id, patch, this.deps.workerId)) return false;
+  private async patchStep(id: string, patch: StepPatch): Promise<boolean> {
+    if (!(await this.deps.store.updateStep(this.runId, id, patch, this.deps.workerId))) return false;
     this.steps.set(id, { ...this.steps.get(id)!, ...patch });
     return true;
   }
@@ -369,9 +367,9 @@ export class RunScheduler {
    * Applies `mutate` and appends `events` in one transaction. If a fenced write fails,
    * the transaction rolls back and the scheduler stops with LeaseLost.
    */
-  private write(mutate: () => boolean, events: PendingEvent[]): void {
+  private async write(mutate: () => Promise<boolean>, events: PendingEvent[]): Promise<void> {
     const before = new Map(this.steps);
-    if (commit(this.deps, this.runId, mutate, events)) return;
+    if (await commit(this.deps, this.runId, mutate, events)) return;
     this.steps = before;
     this.lost = true;
     const err = new LeaseLost();

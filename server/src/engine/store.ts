@@ -1,4 +1,5 @@
-import { Database, type SQLQueryBindings, type Statement } from "bun:sqlite";
+import { AsyncLocalStorage } from "node:async_hooks";
+import type { Db, Queryable } from "./db";
 import type { NormalizedGraph, Profile, RunStatus, Source, StepStatus, Usage } from "./types";
 
 export type NewRun = {
@@ -76,15 +77,15 @@ CREATE TABLE IF NOT EXISTS runs (
   concurrency INTEGER NOT NULL,
   max_replans INTEGER NOT NULL,
   replans INTEGER NOT NULL DEFAULT 0,
-  budget_tokens INTEGER,
-  budget_usd REAL,
-  planning_input_tokens INTEGER NOT NULL DEFAULT 0,
-  planning_output_tokens INTEGER NOT NULL DEFAULT 0,
-  planning_cost_usd REAL NOT NULL DEFAULT 0,
+  budget_tokens BIGINT,
+  budget_usd DOUBLE PRECISION,
+  planning_input_tokens BIGINT NOT NULL DEFAULT 0,
+  planning_output_tokens BIGINT NOT NULL DEFAULT 0,
+  planning_cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
   lease_owner TEXT,
-  lease_expires_at INTEGER,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  lease_expires_at BIGINT,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS runs_status ON runs (status, lease_expires_at);
 
@@ -98,23 +99,23 @@ CREATE TABLE IF NOT EXISTS steps (
   output TEXT,
   sources_json TEXT,
   error TEXT,
-  input_tokens INTEGER NOT NULL DEFAULT 0,
-  output_tokens INTEGER NOT NULL DEFAULT 0,
+  input_tokens BIGINT NOT NULL DEFAULT 0,
+  output_tokens BIGINT NOT NULL DEFAULT 0,
   search_calls INTEGER NOT NULL DEFAULT 0,
-  cost_usd REAL NOT NULL DEFAULT 0,
-  cached INTEGER NOT NULL DEFAULT 0,
-  started_at INTEGER,
-  finished_at INTEGER,
+  cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+  cached BOOLEAN NOT NULL DEFAULT FALSE,
+  started_at BIGINT,
+  finished_at BIGINT,
   seq INTEGER NOT NULL,
   PRIMARY KEY (run_id, step_id)
 );
 
 CREATE TABLE IF NOT EXISTS events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   run_id TEXT NOT NULL,
   type TEXT NOT NULL,
   payload_json TEXT NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS events_run ON events (run_id, id);
 
@@ -122,7 +123,7 @@ CREATE TABLE IF NOT EXISTS step_cache (
   key TEXT PRIMARY KEY,
   output TEXT NOT NULL,
   sources_json TEXT,
-  created_at INTEGER NOT NULL
+  created_at BIGINT NOT NULL
 );
 `;
 
@@ -145,86 +146,96 @@ const STEP_COLUMNS: Record<keyof StepPatch, string> = {
 
 const ALL_STEP_STATUSES: StepStatus[] = ["pending", "running", "succeeded", "failed", "skipped", "superseded"];
 
+/** Writes SQL with `?` placeholders, numbered here into Postgres's `$1, $2, ...`. */
+function numbered(sql: string): string {
+  let n = 0;
+  return sql.replace(/\?/g, () => `$${++n}`);
+}
+
 export class Store {
-  readonly db: Database;
+  private readonly db: Db;
+  /** The transaction the current async call chain is inside, if any. */
+  private readonly current = new AsyncLocalStorage<Queryable>();
 
-  constructor(path: string) {
-    this.db = new Database(path, { create: true, strict: true });
-    this.db.exec("PRAGMA busy_timeout = 5000");
-    if (path !== ":memory:") this.db.exec("PRAGMA journal_mode = WAL");
-    this.db.exec("PRAGMA foreign_keys = ON");
-    this.db.exec(SCHEMA);
+  private constructor(db: Db) {
+    this.db = db;
   }
 
-  close(): void {
-    for (const statement of this.statements.values()) statement.finalize();
-    this.statements.clear();
-    this.db.close();
+  /** Creates the tables if they are missing. */
+  static async open(db: Db): Promise<Store> {
+    await db.exec(SCHEMA);
+    return new Store(db);
   }
 
-  /**
-   * Prepared statements, finalized in close(). Bun's own db.query() cache can drop statements
-   * without finalizing them, which leaves the database file open after close().
-   */
-  private readonly statements = new Map<string, Statement>();
+  close(): Promise<void> {
+    return this.db.close();
+  }
 
-  private q(sql: string): Statement {
-    let statement = this.statements.get(sql);
-    if (!statement) {
-      statement = this.db.prepare(sql);
-      this.statements.set(sql, statement);
-    }
-    return statement;
+  private async q<T = Record<string, unknown>>(sql: string, params: unknown[] = []) {
+    return (this.current.getStore() ?? this.db).query<T>(numbered(sql), params);
   }
 
   /**
-   * Runs `fn` in an IMMEDIATE transaction so concurrent processes serialize writers.
-   * A call inside an open transaction joins it.
+   * Runs `fn` in a transaction. `lockRun` takes the run's row lock first, so every write to one
+   * run is serialized across processes and its events get ids in commit order. A call inside an
+   * open transaction joins it.
    */
-  tx<T>(fn: () => T): T {
-    if (this.db.inTransaction) return fn();
-    return this.db.transaction(fn).immediate();
-  }
-
-  createRun(r: NewRun): void {
-    this
-      .q(
-        `INSERT INTO runs (id, goal, profile, status, concurrency, max_replans, budget_tokens, budget_usd, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(r.id, r.goal, r.profile, r.status, r.concurrency, r.maxReplans, r.budgetTokens, r.budgetUsd, r.now, r.now);
-  }
-
-  getRun(id: string): RunRow | null {
-    const row = this.q("SELECT * FROM runs WHERE id = ?").get(id) as Record<string, unknown> | null;
-    return row ? toRun(row) : null;
-  }
-
-  listRuns(limit: number): RunSummary[] {
-    const rows = this.q("SELECT * FROM runs ORDER BY created_at DESC, id DESC LIMIT ?").all(limit) as Record<
-      string,
-      unknown
-    >[];
-    const counts = this.q("SELECT status, COUNT(*) AS n FROM steps WHERE run_id = ? GROUP BY status");
-
-    return rows.map((row) => {
-      const { graph: _graph, ...run } = toRun(row);
-      const stepCounts = Object.fromEntries(ALL_STEP_STATUSES.map((s) => [s, 0])) as Record<StepStatus, number>;
-      for (const c of counts.all(run.id) as { status: StepStatus; n: number }[]) stepCounts[c.status] = c.n;
-      return { ...run, stepCounts, totals: this.totals(run.id) };
-    });
-  }
-
-  setRunStatus(id: string, status: RunStatus, error: string | null, now: number, fence?: string): boolean {
-    return this.guarded(
-      "UPDATE runs SET status = ?, error = ?, updated_at = ? WHERE id = ?",
-      [status, error, now, id],
-      id,
-      fence,
+  async tx<T>(fn: () => Promise<T>, opts: { lockRun?: string; readOnly?: boolean } = {}): Promise<T> {
+    if (this.current.getStore()) return fn();
+    return this.db.transaction(
+      (tx) =>
+        this.current.run(tx, async () => {
+          if (opts.lockRun) await this.q("SELECT 1 FROM runs WHERE id = ? FOR UPDATE", [opts.lockRun]);
+          return fn();
+        }),
+      { readOnly: opts.readOnly },
     );
   }
 
-  incrementReplans(id: string, fence?: string): boolean {
+  async createRun(r: NewRun): Promise<void> {
+    await this.q(
+      `INSERT INTO runs (id, goal, profile, status, concurrency, max_replans, budget_tokens, budget_usd, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [r.id, r.goal, r.profile, r.status, r.concurrency, r.maxReplans, r.budgetTokens, r.budgetUsd, r.now, r.now],
+    );
+  }
+
+  async getRun(id: string): Promise<RunRow | null> {
+    const { rows } = await this.q("SELECT * FROM runs WHERE id = ?", [id]);
+    return rows[0] ? toRun(rows[0]) : null;
+  }
+
+  /** Recent runs with step counts and totals, in two queries however many runs there are. */
+  async listRuns(limit: number): Promise<RunSummary[]> {
+    const { rows } = await this.q("SELECT * FROM runs ORDER BY created_at DESC, id DESC LIMIT ?", [limit]);
+    const runs = rows.map(toRun);
+    const { rows: groups } = await this.q<{ run_id: string; status: StepStatus; n: number; i: number; o: number; s: number; c: number }>(
+      `SELECT run_id, status, COUNT(*)::int AS n, SUM(input_tokens)::float8 AS i, SUM(output_tokens)::float8 AS o,
+              SUM(search_calls)::float8 AS s, SUM(cost_usd)::float8 AS c
+       FROM steps WHERE run_id = ANY(?) GROUP BY run_id, status`,
+      [runs.map((r) => r.id)],
+    );
+
+    return runs.map(({ graph: _graph, ...run }, i) => {
+      const stepCounts = Object.fromEntries(ALL_STEP_STATUSES.map((s) => [s, 0])) as Record<StepStatus, number>;
+      const steps = { i: 0, o: 0, s: 0, c: 0 };
+      for (const g of groups) {
+        if (g.run_id !== run.id) continue;
+        stepCounts[g.status] = g.n;
+        steps.i += g.i;
+        steps.o += g.o;
+        steps.s += g.s;
+        steps.c += g.c;
+      }
+      return { ...run, stepCounts, totals: sumTotals(steps, planningOf(rows[i]!)) };
+    });
+  }
+
+  setRunStatus(id: string, status: RunStatus, error: string | null, now: number, fence?: string): Promise<boolean> {
+    return this.guarded("UPDATE runs SET status = ?, error = ?, updated_at = ? WHERE id = ?", [status, error, now, id], id, fence);
+  }
+
+  incrementReplans(id: string, fence?: string): Promise<boolean> {
     return this.guarded("UPDATE runs SET replans = replans + 1 WHERE id = ?", [id], id, fence);
   }
 
@@ -232,16 +243,9 @@ export class Store {
    * Makes `graph` the run's current graph. Steps new to this version are inserted as pending,
    * ids in `supersede` are retired, and rows that already exist keep their state.
    */
-  installGraph(
-    runId: string,
-    graph: NormalizedGraph,
-    version: number,
-    supersede: string[],
-    now: number,
-    fence?: string,
-  ): boolean {
-    return this.tx(() => {
-      const updated = this.guarded(
+  installGraph(runId: string, graph: NormalizedGraph, version: number, supersede: string[], now: number, fence?: string): Promise<boolean> {
+    return this.tx(async () => {
+      const updated = await this.guarded(
         "UPDATE runs SET graph_json = ?, graph_version = ?, updated_at = ? WHERE id = ?",
         [JSON.stringify(graph), version, now, runId],
         runId,
@@ -249,38 +253,35 @@ export class Store {
       );
       if (!updated) return false;
 
-      const retire = this.q("UPDATE steps SET status = 'superseded' WHERE run_id = ? AND step_id = ?");
-      for (const id of supersede) retire.run(runId, id);
-
-      const { next } = this.q("SELECT COALESCE(MAX(seq), -1) + 1 AS next FROM steps WHERE run_id = ?").get(runId) as {
-        next: number;
-      };
-      const insert = this.q(
-        "INSERT OR IGNORE INTO steps (run_id, step_id, graph_version, status, seq) VALUES (?, ?, ?, 'pending', ?)",
-      );
-      graph.order.forEach((id, i) => insert.run(runId, id, version, next + i));
+      for (const id of supersede) {
+        await this.q("UPDATE steps SET status = 'superseded' WHERE run_id = ? AND step_id = ?", [runId, id]);
+      }
+      const { rows } = await this.q<{ next: number }>("SELECT COALESCE(MAX(seq), -1) + 1 AS next FROM steps WHERE run_id = ?", [runId]);
+      const next = rows[0]!.next;
+      for (const [i, id] of graph.order.entries()) {
+        await this.q(
+          "INSERT INTO steps (run_id, step_id, graph_version, status, seq) VALUES (?, ?, ?, 'pending', ?) ON CONFLICT DO NOTHING",
+          [runId, id, version, next + i],
+        );
+      }
       return true;
     });
   }
 
-  getSteps(runId: string): StepRow[] {
-    const rows = this.q("SELECT * FROM steps WHERE run_id = ? ORDER BY seq").all(runId) as Record<string, unknown>[];
+  async getSteps(runId: string): Promise<StepRow[]> {
+    const { rows } = await this.q("SELECT * FROM steps WHERE run_id = ? ORDER BY seq", [runId]);
     return rows.map(toStep);
   }
 
-  updateStep(runId: string, stepId: string, patch: StepPatch, fence?: string): boolean {
+  updateStep(runId: string, stepId: string, patch: StepPatch, fence?: string): Promise<boolean> {
     const entries = Object.entries(patch) as [keyof StepPatch, StepPatch[keyof StepPatch]][];
-    if (entries.length === 0) return true;
+    if (entries.length === 0) return Promise.resolve(true);
     const sets = entries.map(([key]) => `${STEP_COLUMNS[key]} = ?`).join(", ");
-    const values = entries.map(([key, value]) => {
-      if (key === "sources") return JSON.stringify(value);
-      if (key === "cached") return value ? 1 : 0;
-      return value as SQLQueryBindings;
-    });
+    const values = entries.map(([key, value]) => (key === "sources" ? JSON.stringify(value) : value));
     return this.guarded(`UPDATE steps SET ${sets} WHERE run_id = ? AND step_id = ?`, [...values, runId, stepId], runId, fence);
   }
 
-  addStepUsage(runId: string, stepId: string, usage: Usage, costUsd: number, fence?: string): boolean {
+  addStepUsage(runId: string, stepId: string, usage: Usage, costUsd: number, fence?: string): Promise<boolean> {
     return this.guarded(
       `UPDATE steps SET input_tokens = input_tokens + ?, output_tokens = output_tokens + ?,
          search_calls = search_calls + ?, cost_usd = cost_usd + ?
@@ -291,7 +292,7 @@ export class Store {
     );
   }
 
-  addPlanningUsage(runId: string, usage: Usage, costUsd: number, fence?: string): boolean {
+  addPlanningUsage(runId: string, usage: Usage, costUsd: number, fence?: string): Promise<boolean> {
     return this.guarded(
       `UPDATE runs SET planning_input_tokens = planning_input_tokens + ?,
          planning_output_tokens = planning_output_tokens + ?, planning_cost_usd = planning_cost_usd + ?
@@ -306,143 +307,149 @@ export class Store {
    * Moves steps in any of `from` to `to`, clearing error and finish time. Returns the count moved.
    * `clearAttempts` restarts the retry count, which a manual retry of a failed run needs.
    */
-  resetSteps(runId: string, from: StepStatus[], to: StepStatus, fence?: string, clearAttempts = false): number {
-    const placeholders = from.map(() => "?").join(", ");
+  async resetSteps(runId: string, from: StepStatus[], to: StepStatus, fence?: string, clearAttempts = false): Promise<number> {
     const attempts = clearAttempts ? ", attempt = 0" : "";
-    let sql = `UPDATE steps SET status = ?, error = NULL, finished_at = NULL${attempts} WHERE run_id = ? AND status IN (${placeholders})`;
-    const params: SQLQueryBindings[] = [to, runId, ...from];
+    let sql = `UPDATE steps SET status = ?, error = NULL, finished_at = NULL${attempts} WHERE run_id = ? AND status = ANY(?)`;
+    const params: unknown[] = [to, runId, from];
     if (fence) {
       sql += ` AND ${FENCE}`;
       params.push(runId, fence);
     }
-    return this.q(sql).run(...params).changes;
+    return (await this.q(sql, params)).rowCount;
   }
 
   /**
    * The run, its steps and totals, plus the id of the last event already reflected in them.
-   * One read transaction keeps the rows and the cursor consistent, so a client that streams
+   * One read transaction keeps the rows and the cursor consistent, so a client that reads
    * events after `lastEventId` sees every later change exactly once.
    */
-  snapshot(runId: string): { run: RunRow; steps: StepRow[]; totals: Totals; lastEventId: number } | null {
-    this.db.exec("BEGIN DEFERRED");
-    try {
-      const run = this.getRun(runId);
-      if (!run) return null;
-      const { last } = this.q("SELECT COALESCE(MAX(id), 0) AS last FROM events WHERE run_id = ?").get(runId) as { last: number };
-      return { run, steps: this.getSteps(runId), totals: this.totals(runId), lastEventId: last };
-    } finally {
-      this.db.exec("COMMIT");
-    }
+  snapshot(runId: string): Promise<{ run: RunRow; steps: StepRow[]; totals: Totals; lastEventId: number } | null> {
+    return this.tx(
+      async () => {
+        const run = await this.getRun(runId);
+        if (!run) return null;
+        const { rows } = await this.q<{ last: string }>("SELECT COALESCE(MAX(id), 0) AS last FROM events WHERE run_id = ?", [runId]);
+        return { run, steps: await this.getSteps(runId), totals: await this.totals(runId), lastEventId: Number(rows[0]!.last) };
+      },
+      { readOnly: true },
+    );
   }
 
-  totals(runId: string): Totals {
-    const steps = this
-      .q(
-        `SELECT COALESCE(SUM(input_tokens), 0) AS i, COALESCE(SUM(output_tokens), 0) AS o,
-                COALESCE(SUM(search_calls), 0) AS s, COALESCE(SUM(cost_usd), 0) AS c
-         FROM steps WHERE run_id = ?`,
-      )
-      .get(runId) as { i: number; o: number; s: number; c: number };
-    const planning = this
-      .q("SELECT planning_input_tokens AS i, planning_output_tokens AS o, planning_cost_usd AS c FROM runs WHERE id = ?")
-      .get(runId) as { i: number; o: number; c: number } | null;
-
-    return {
-      inputTokens: steps.i + (planning?.i ?? 0),
-      outputTokens: steps.o + (planning?.o ?? 0),
-      searchCalls: steps.s,
-      // Round away float noise from summing many small costs.
-      costUsd: Math.round((steps.c + (planning?.c ?? 0)) * 1e8) / 1e8,
-    };
+  async totals(runId: string): Promise<Totals> {
+    const { rows } = await this.q<{ i: number; o: number; s: number; c: number }>(
+      `SELECT COALESCE(SUM(input_tokens), 0)::float8 AS i, COALESCE(SUM(output_tokens), 0)::float8 AS o,
+              COALESCE(SUM(search_calls), 0)::float8 AS s, COALESCE(SUM(cost_usd), 0)::float8 AS c
+       FROM steps WHERE run_id = ?`,
+      [runId],
+    );
+    const { rows: runRows } = await this.q("SELECT * FROM runs WHERE id = ?", [runId]);
+    return sumTotals(rows[0]!, runRows[0] ? planningOf(runRows[0]) : { i: 0, o: 0, c: 0 });
   }
 
-  appendEvent(runId: string, type: string, payload: unknown, now: number): number {
-    const result = this
-      .q("INSERT INTO events (run_id, type, payload_json, created_at) VALUES (?, ?, ?, ?)")
-      .run(runId, type, JSON.stringify(payload), now);
-    return Number(result.lastInsertRowid);
+  async appendEvent(runId: string, type: string, payload: unknown, now: number): Promise<number> {
+    const { rows } = await this.q<{ id: string }>(
+      "INSERT INTO events (run_id, type, payload_json, created_at) VALUES (?, ?, ?, ?) RETURNING id",
+      [runId, type, JSON.stringify(payload), now],
+    );
+    return Number(rows[0]!.id);
   }
 
-  eventsAfter(runId: string, afterId: number, limit = 500): EventRow[] {
-    const rows = this
-      .q("SELECT * FROM events WHERE run_id = ? AND id > ? ORDER BY id LIMIT ?")
-      .all(runId, afterId, limit) as Record<string, unknown>[];
+  async eventsAfter(runId: string, afterId: number, limit = 500): Promise<EventRow[]> {
+    const { rows } = await this.q("SELECT * FROM events WHERE run_id = ? AND id > ? ORDER BY id LIMIT ?", [runId, afterId, limit]);
     return rows.map((r) => ({
-      id: r.id as number,
+      id: Number(r.id),
       runId: r.run_id as string,
       type: r.type as string,
       payload: JSON.parse(r.payload_json as string),
-      createdAt: r.created_at as number,
+      createdAt: Number(r.created_at),
     }));
   }
 
-  claimRun(runId: string, workerId: string, now: number, ttlMs: number): boolean {
-    return (
-      this
-        .q(
-          `UPDATE runs SET lease_owner = ?, lease_expires_at = ?
-           WHERE id = ? AND status IN ('planning', 'running')
-             AND (lease_owner IS NULL OR lease_expires_at < ?)`,
-        )
-        .run(workerId, now + ttlMs, runId, now).changes === 1
+  async claimRun(runId: string, workerId: string, now: number, ttlMs: number): Promise<boolean> {
+    const { rowCount } = await this.q(
+      `UPDATE runs SET lease_owner = ?, lease_expires_at = ?
+       WHERE id = ? AND status IN ('planning', 'running')
+         AND (lease_owner IS NULL OR lease_expires_at < ?)`,
+      [workerId, now + ttlMs, runId, now],
     );
+    return rowCount === 1;
   }
 
-  heartbeat(runId: string, workerId: string, now: number, ttlMs: number): boolean {
-    return (
-      this
-        .q("UPDATE runs SET lease_expires_at = ? WHERE id = ? AND lease_owner = ?")
-        .run(now + ttlMs, runId, workerId).changes === 1
+  async heartbeat(runId: string, workerId: string, now: number, ttlMs: number): Promise<boolean> {
+    const { rowCount } = await this.q("UPDATE runs SET lease_expires_at = ? WHERE id = ? AND lease_owner = ?", [now + ttlMs, runId, workerId]);
+    return rowCount === 1;
+  }
+
+  async releaseRun(runId: string, workerId: string): Promise<void> {
+    await this.q("UPDATE runs SET lease_owner = NULL, lease_expires_at = NULL WHERE id = ? AND lease_owner = ?", [runId, workerId]);
+  }
+
+  async claimableRuns(now: number): Promise<string[]> {
+    const { rows } = await this.q<{ id: string }>(
+      `SELECT id FROM runs WHERE status IN ('planning', 'running')
+         AND (lease_owner IS NULL OR lease_expires_at < ?)
+       ORDER BY created_at`,
+      [now],
     );
-  }
-
-  releaseRun(runId: string, workerId: string): void {
-    this
-      .q("UPDATE runs SET lease_owner = NULL, lease_expires_at = NULL WHERE id = ? AND lease_owner = ?")
-      .run(runId, workerId);
-  }
-
-  claimableRuns(now: number): string[] {
-    const rows = this
-      .q(
-        `SELECT id FROM runs WHERE status IN ('planning', 'running')
-           AND (lease_owner IS NULL OR lease_expires_at < ?)
-         ORDER BY created_at`,
-      )
-      .all(now) as { id: string }[];
     return rows.map((r) => r.id);
   }
 
   /** Removes a run with its steps and events. Returns false when the run is already gone. */
-  deleteRun(runId: string): boolean {
-    return this.tx(() => {
-      this.q("DELETE FROM events WHERE run_id = ?").run(runId);
-      this.q("DELETE FROM steps WHERE run_id = ?").run(runId);
-      return this.q("DELETE FROM runs WHERE id = ?").run(runId).changes > 0;
+  deleteRun(runId: string): Promise<boolean> {
+    return this.tx(async () => {
+      await this.q("DELETE FROM events WHERE run_id = ?", [runId]);
+      await this.q("DELETE FROM steps WHERE run_id = ?", [runId]);
+      return (await this.q("DELETE FROM runs WHERE id = ?", [runId])).rowCount > 0;
     });
   }
 
-  cacheGet(key: string): { output: string; sources: Source[] } | null {
-    const row = this.q("SELECT output, sources_json FROM step_cache WHERE key = ?").get(key) as {
-      output: string;
-      sources_json: string | null;
-    } | null;
+  async cacheGet(key: string): Promise<{ output: string; sources: Source[] } | null> {
+    const { rows } = await this.q<{ output: string; sources_json: string | null }>(
+      "SELECT output, sources_json FROM step_cache WHERE key = ?",
+      [key],
+    );
+    const row = rows[0];
     return row ? { output: row.output, sources: row.sources_json ? JSON.parse(row.sources_json) : [] } : null;
   }
 
-  cachePut(key: string, output: string, sources: Source[], now: number): void {
-    this
-      .q("INSERT OR REPLACE INTO step_cache (key, output, sources_json, created_at) VALUES (?, ?, ?, ?)")
-      .run(key, output, JSON.stringify(sources), now);
+  async cachePut(key: string, output: string, sources: Source[], now: number): Promise<void> {
+    await this.q(
+      `INSERT INTO step_cache (key, output, sources_json, created_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT (key) DO UPDATE SET output = EXCLUDED.output, sources_json = EXCLUDED.sources_json, created_at = EXCLUDED.created_at`,
+      [key, output, JSON.stringify(sources), now],
+    );
   }
 
-  private guarded(sql: string, params: SQLQueryBindings[], runId: string, fence?: string): boolean {
+  private async guarded(sql: string, params: unknown[], runId: string, fence?: string): Promise<boolean> {
     if (fence) {
       sql += ` AND ${FENCE}`;
       params = [...params, runId, fence];
     }
-    return this.q(sql).run(...params).changes > 0;
+    return (await this.q(sql, params)).rowCount > 0;
   }
+}
+
+function planningOf(r: Record<string, unknown>) {
+  return { i: Number(r.planning_input_tokens), o: Number(r.planning_output_tokens), c: Number(r.planning_cost_usd) };
+}
+
+function sumTotals(steps: { i: number; o: number; s: number; c: number }, planning: { i: number; o: number; c: number }): Totals {
+  return {
+    inputTokens: steps.i + planning.i,
+    outputTokens: steps.o + planning.o,
+    searchCalls: steps.s,
+    // Round away float noise from summing many small costs.
+    costUsd: Math.round((steps.c + planning.c) * 1e8) / 1e8,
+  };
+}
+
+/** Postgres returns BIGINT columns as strings. */
+function num(value: unknown): number {
+  return Number(value);
+}
+
+function numOrNull(value: unknown): number | null {
+  return value === null || value === undefined ? null : Number(value);
 }
 
 function toRun(r: Record<string, unknown>): RunRow {
@@ -457,12 +464,12 @@ function toRun(r: Record<string, unknown>): RunRow {
     concurrency: r.concurrency as number,
     maxReplans: r.max_replans as number,
     replans: r.replans as number,
-    budgetTokens: r.budget_tokens as number | null,
-    budgetUsd: r.budget_usd as number | null,
+    budgetTokens: numOrNull(r.budget_tokens),
+    budgetUsd: numOrNull(r.budget_usd),
     leaseOwner: r.lease_owner as string | null,
-    leaseExpiresAt: r.lease_expires_at as number | null,
-    createdAt: r.created_at as number,
-    updatedAt: r.updated_at as number,
+    leaseExpiresAt: numOrNull(r.lease_expires_at),
+    createdAt: num(r.created_at),
+    updatedAt: num(r.updated_at),
   };
 }
 
@@ -477,12 +484,12 @@ function toStep(r: Record<string, unknown>): StepRow {
     output: r.output as string | null,
     sources: r.sources_json ? (JSON.parse(r.sources_json as string) as Source[]) : [],
     error: r.error as string | null,
-    inputTokens: r.input_tokens as number,
-    outputTokens: r.output_tokens as number,
-    searchCalls: r.search_calls as number,
-    costUsd: r.cost_usd as number,
-    cached: r.cached === 1,
-    startedAt: r.started_at as number | null,
-    finishedAt: r.finished_at as number | null,
+    inputTokens: num(r.input_tokens),
+    outputTokens: num(r.output_tokens),
+    searchCalls: num(r.search_calls),
+    costUsd: num(r.cost_usd),
+    cached: r.cached === true,
+    startedAt: numOrNull(r.started_at),
+    finishedAt: numOrNull(r.finished_at),
   };
 }

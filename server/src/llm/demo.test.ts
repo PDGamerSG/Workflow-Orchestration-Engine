@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Engine } from "../engine/engine";
-import { Store } from "../engine/store";
 import { GENERAL_PLAN_INTRO } from "../planner/profiles";
 import { Planner } from "../planner/planner";
+import { testStore } from "../test/helpers";
 import { createDemoProvider, sampleFromSchema } from "./demo";
 
 let cleanup: (() => Promise<void>) | null = null;
@@ -14,7 +14,7 @@ afterEach(async () => {
 describe("demo provider", () => {
   for (const profile of ["research", "general"] as const) {
     test(`runs a ${profile} goal end to end`, async () => {
-      const store = new Store(":memory:");
+      const store = await testStore();
       const provider = createDemoProvider({ minDelayMs: 1, jitterMs: 5 });
       const engine = new Engine({
         store,
@@ -23,15 +23,12 @@ describe("demo provider", () => {
         pricing: { inputPerM: 1, outputPerM: 1, searchPerK: 1 },
         rpm: 60_000,
       });
-      cleanup = async () => {
-        await engine.stop();
-        store.close();
-      };
+      cleanup = () => engine.stop();
 
-      const { runId } = engine.createRun({ goal: "Should a small team pick SQLite or Postgres?", profile });
+      const { runId } = await engine.createRun({ goal: "Should a small team pick SQLite or Postgres?", profile });
       await engine.whenSettled(runId);
 
-      const run = store.getRun(runId)!;
+      const run = (await store.getRun(runId))!;
       expect(run.status).toBe("succeeded");
       expect(run.graph!.steps.some((s) => s.final)).toBe(true);
     });

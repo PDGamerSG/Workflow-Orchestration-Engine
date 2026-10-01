@@ -2,24 +2,25 @@
   "name": "@relay/server",
   "private": true,
   "type": "module",
-  "module": "src/index.ts",
   "scripts": {
-    "dev": "bun --env-file=../.env --watch src/index.ts",
-    "start": "bun --env-file=../.env src/index.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "bench": "bun scripts/bench.ts",
     "demo:crash": "bun scripts/crash-demo.ts"
   },
   "dependencies": {
+    "@electric-sql/pglite": "^0.5.8",
     "@google/genai": "2.22.0",
     "ajv": "^8.20.0",
-    "express": "5.2.1",
+    "pg": "^8.23.1",
     "zod": "4.6.5"
   },
   "devDependencies": {
     "@types/bun": "^1.4.2",
-    "@types/express": "^5.0.6",
+    "@types/pg": "^8.23.1",
     "typescript": "^5.9.3"
+  },
+  "exports": {
+    ".": "./src/relay.ts"
   }
 }
