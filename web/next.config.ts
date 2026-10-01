@@ -1,14 +1,18 @@
 import type { NextConfig } from "next";
 
-// Where the dashboard's server forwards /api requests. A deployment that runs the engine next
-// to the dashboard builds with NEXT_PUBLIC_API_URL=/api, so the browser only talks to one origin.
-const engineUrl = (process.env.ENGINE_URL ?? "http://localhost:4000").replace(/\/$/, "");
+// Local development keeps one .env at the repo root. Variables already set, as on Vercel, win.
+try {
+  process.loadEnvFile("../.env");
+} catch {
+  // No root .env: fine on Vercel and for the demo provider.
+}
 
 const nextConfig: NextConfig = {
   agentRules: false,
-  async rewrites() {
-    return [{ source: "/api/:path*", destination: `${engineUrl}/:path*` }];
-  },
+  // The engine lives in the server workspace as TypeScript.
+  transpilePackages: ["@relay/server"],
+  // PGlite loads its WebAssembly from its own package folder, and pg has optional native bits.
+  serverExternalPackages: ["@electric-sql/pglite", "pg"],
 };
 
 export default nextConfig;

@@ -1,6 +1,6 @@
-import type { CreateRunRequest, RunSnapshot, RunSummary } from "./types";
+import type { CreateRunRequest, RunEvent, RunSnapshot, RunSummary } from "./types";
 
-export const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000").replace(/\/$/, "");
+export const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "/api").replace(/\/$/, "");
 
 export class ApiError extends Error {
   constructor(
@@ -22,7 +22,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       cache: "no-store",
     });
   } catch {
-    throw new ApiError(`The engine at ${API_URL} is not reachable. Start it with "bun run dev".`, 0, "unreachable");
+    throw new ApiError("The engine is not reachable. Check your connection, or start it with \"bun run dev\".", 0, "unreachable");
   }
   const body = await res.json().catch(() => null);
   if (!res.ok) {
@@ -41,5 +41,6 @@ export const api = {
   cancelRun: (id: string) => request<{ ok: true }>(`/runs/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
   retryRun: (id: string) => request<{ ok: true }>(`/runs/${encodeURIComponent(id)}/retry`, { method: "POST" }),
   deleteRun: (id: string) => request<{ ok: true }>(`/runs/${encodeURIComponent(id)}`, { method: "DELETE" }),
-  eventsUrl: (id: string, after: number) => `${API_URL}/runs/${encodeURIComponent(id)}/events?after=${after}`,
+  events: (id: string, after: number) =>
+    request<{ events: RunEvent[] }>(`/runs/${encodeURIComponent(id)}/events?after=${after}`).then((r) => r.events),
 };

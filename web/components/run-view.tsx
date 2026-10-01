@@ -22,7 +22,7 @@ import { Timeline } from "./timeline";
 
 export function RunView({ runId }: { runId: string }) {
   const router = useRouter();
-  const { state, error, connection } = useRun(runId);
+  const { state, error, connection, refresh } = useRun(runId);
   // null means "follow the run": the panel shows whatever step matters right now.
   // A link can point at one step instead, so ?step= seeds the choice.
   const stepParam = useSearchParams().get("step");
@@ -92,13 +92,13 @@ export function RunView({ runId }: { runId: string }) {
     setBusy(true);
     setActionError(null);
     try {
-      if (action === "cancel") await api.cancelRun(runId);
-      else if (action === "retry") await api.retryRun(runId);
-      else {
+      if (action === "delete") {
         await api.deleteRun(runId);
         router.push("/");
         return;
       }
+      await (action === "cancel" ? api.cancelRun(runId) : api.retryRun(runId));
+      refresh();
     } catch (err) {
       setActionError(err instanceof ApiError ? err.message : "The request failed.");
     } finally {

@@ -21,7 +21,7 @@ const BAR_ORDER: { status: StepStatus; color: string }[] = [
 export function RunsTable() {
   const [runs, setRuns] = useState<RunSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Kept apart from `error`: the poll below clears its own error every three seconds,
+  // Kept apart from `error`: the poll below clears its own error on every refresh,
   // which would wipe a failed delete before it could be read.
   const [actionError, setActionError] = useState<string | null>(null);
   const [filter, setFilter] = useState<RunFilter>("all");
@@ -31,20 +31,27 @@ export function RunsTable() {
 
   useEffect(() => {
     let alive = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // Every poll wakes the database, so the list refreshes quickly only while a run is going.
     const load = () =>
       api.listRuns().then(
         (r) => {
           if (!alive) return;
           setRuns(r);
           setError(null);
+          const busy = r.some((run) => run.status === "planning" || run.status === "running");
+          timer = setTimeout(load, busy ? 3_000 : 15_000);
         },
-        (err: Error) => alive && setError(err.message),
+        (err: Error) => {
+          if (!alive) return;
+          setError(err.message);
+          timer = setTimeout(load, 5_000);
+        },
       );
     load();
-    const timer = setInterval(load, 3_000);
     return () => {
       alive = false;
-      clearInterval(timer);
+      clearTimeout(timer);
     };
   }, []);
 

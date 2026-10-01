@@ -7,7 +7,7 @@
     "web"
   ],
   "scripts": {
-    "dev": "bun --filter '*' dev",
+    "dev": "bun --filter '@relay/web' dev",
     "test": "bun --filter '*' test",
     "typecheck": "bun --filter '*' typecheck",
     "bench": "bun --filter '@relay/server' bench",
