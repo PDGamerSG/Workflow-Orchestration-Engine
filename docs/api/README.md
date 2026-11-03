@@ -9,12 +9,12 @@ Call `GET /api/session` first and preserve `Set-Cookie`. The browser serializes 
 Writes reject a mismatched `Origin` or `Sec-Fetch-Site: cross-site`. CLI clients can preserve a cookie jar and send the origin explicitly. Do not log or commit the jar.
 
 ```bash
-curl -c /tmp/relay-cookies -b /tmp/relay-cookies https://relay.pallabdas.me/api/session
+curl -c /tmp/relay-cookies -b /tmp/relay-cookies https://relay-workflows-rust.vercel.app/api/session
 curl -c /tmp/relay-cookies -b /tmp/relay-cookies \
   -H 'Content-Type: application/json' \
-  -H 'Origin: https://relay.pallabdas.me' \
+  -H 'Origin: https://relay-workflows-rust.vercel.app' \
   --data '{"graph":{"steps":[{"id":"first","prompt":"Explain checkpoints."},{"id":"summary","prompt":"Summarize: {{first.output}}","final":true}]}}' \
-  https://relay.pallabdas.me/api/runs
+  https://relay-workflows-rust.vercel.app/api/runs
 ```
 
 ## Routes

@@ -72,7 +72,7 @@
 ## Task 6: Publish and connect the URL
 
 - [x] Inspect the existing Relay Vercel project and reuse its database/access where correctly scoped.
-- [ ] Set the encryption secret privately; deploy the verified branch revision; verify production API and UI.
-- [ ] Attach the available `relay.pallabdas.me` hostname using the Namecheap skill; preserve existing DNS records.
-- [ ] Verify TLS and production asset identity within the shared propagation deadline.
-- [ ] Update README/live metadata and GitHub About; push commits and open a linked pull request with exact test evidence.
+- [x] Reuse the stable saved encryption secret; deploy the verified branch revision; verify production API and UI.
+- [x] Attach `relay.pallabdas.me` and save the project-specific Namecheap CNAME; preserve existing DNS records.
+- [ ] Custom-host HTTPS/browser verification remains pending after the shared propagation deadline. DNS and Vercel domain verification passed; the public Vercel alias has verified TLS and matching release assets.
+- [x] Update README and GitHub About with the verified Vercel URL; push commits and open linked PR #4 with exact evidence.

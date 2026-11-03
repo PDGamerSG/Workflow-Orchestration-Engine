@@ -9,7 +9,7 @@ Verification date: 2026-11-04. Commands run against the release branch; no paid 
 | Web library tests | 37 passed, 0 failed. |
 | Type checking and lint | Passed for both workspaces / web lint. |
 | Production Next.js build | Passed. |
-| Chromium end-to-end | 5 passed: demo/export, retry, validation/cancel/delete, workspace isolation, responsive labelled controls. |
+| Chromium end-to-end | 6 passed locally. Cases cover initialization-safe editing, demo/export, retry, validation/cancel/delete, workspace isolation and responsive labelled controls. The original five also passed against the deployed release; the added regression is verified with the updated source. |
 | Crash demo | Completed steps 1–3 retained; interrupted step 4 attempted twice; no completed step repeated; successor completed. |
 | Benchmark | Simulated 12-step workload: 10.40 s at concurrency 1, 4.48 s at 4, 3.61 s at 8. Mixed graph: Relay 3.83 s vs level-by-level 4.61 s. |
 | Production dependency audit | No vulnerabilities reported after patches. |
@@ -29,4 +29,8 @@ The upstream Readme Pro Max checker requires a `Team ...` credit line. The owner
 
 ## Public release
 
-Deployment, DNS, HTTPS and public smoke-test evidence is added here after publishing the verified source.
+The verified public release is [relay-workflows-rust.vercel.app](https://relay-workflows-rust.vercel.app/). Initial release source `ee107ea` deployed as `dpl_GFGyaA8u48dSJRtk6hEFD3VXBcaT`, with immutable URL `https://relay-workflows-3f6y1eixi-pallab-das-projects-d3f377fd.vercel.app`. Vercel reported READY, `/api/health` returned 200, and all five original Playwright workflows passed on the public alias. Its eight JS/CSS assets exactly matched HTML captured from the protected immutable deployment through authenticated Vercel access. Protection was retained.
+
+Namecheap saved `CNAME relay → 8e7efbe083a6a848.vercel-dns-017.com.` with Automatic TTL at 2026-11-03 22:03:20 UTC. Other records were preserved. Both authoritative DNS and a public resolver returned the new target, and Vercel confirmed the domain was configured correctly for `relay-workflows`. During the single 180-second propagation window, the local resolver/browser retained NXDOMAIN and HTTPS checks with normal TLS validation and explicit resolved IPs failed during handshake. No HTTPS/custom-host browser success is claimed. Further retries were stopped at that deadline; use the verified public alias until that external check is completed.
+
+GitHub CI exposed early editing before React hydration. The failure artifact showed inserted text combined with the initial graph. A delayed-connections browser regression failed before the fix; disabling the two textareas until initialization completes made it pass. The complete six-case local browser suite, type checking, lint and production build passed after the fix.

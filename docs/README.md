@@ -1,6 +1,6 @@
 # Relay documentation
 
-Relay is an individual portfolio project by Pallab Das. Start with the [live playground](https://relay.pallabdas.me/playground) or run the scripted demo locally.
+Relay is an individual portfolio project by Pallab Das. Start with the [live playground](https://relay-workflows-rust.vercel.app/playground) or run the scripted demo locally.
 
 | Goal | Read |
 | --- | --- |

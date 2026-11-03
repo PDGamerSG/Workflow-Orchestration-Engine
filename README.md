@@ -4,7 +4,7 @@
 
 - [Pallab Das](https://github.com/PDGamerSG)
 
-Live link: [relay.pallabdas.me](https://relay.pallabdas.me/)
+Live link: [relay-workflows-rust.vercel.app](https://relay-workflows-rust.vercel.app/)
 
 <p align="center">
   <img src="docs/images/hero.png" width="760" alt="Relay homepage with a runnable workflow demo and an interactive dependency diagram" />
@@ -158,6 +158,7 @@ The site runs on Vercel with Neon Postgres. Import the repository with root dire
 
 ## Known limits
 
+- The intended custom hostname `relay.pallabdas.me` has verified DNS, but its HTTPS/browser check remains pending. The live link above is verified.
 - A browser cookie is the workspace credential. There is no account login, cross-device sync or recovery after the cookie is lost or expires.
 - Serverless recovery needs a later API request. Unattended execution needs a persistent worker or scheduled wakeup.
 - Interrupted steps execute at least once and can incur repeated provider charges. Side-effecting tools would require idempotency controls.
