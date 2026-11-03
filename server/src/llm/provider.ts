@@ -2,6 +2,8 @@ import type { Source, ToolName, Usage } from "../engine/types";
 
 export type LlmRequest = {
   prompt: string;
+  /** Optional execution context for local routing and observability. */
+  stepId?: string;
   tools?: ToolName[];
   /** When set, the model must answer with JSON that matches this schema. */
   jsonSchema?: Record<string, unknown>;

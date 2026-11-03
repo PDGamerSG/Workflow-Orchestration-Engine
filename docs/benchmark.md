@@ -8,10 +8,10 @@ A 12-step research graph: 10 independent researchers (600 to 1,100 ms each), a f
 
 | Steps at once | Wall time | Speedup |
 |---|---|---|
-| 1 | 10.42 s | 1.0x |
-| 2 | 6.59 s | 1.6x |
-| 4 | 4.53 s | 2.3x |
-| 8 | 3.63 s | 2.9x |
+| 1 | 10.40 s | 1.0x |
+| 2 | 6.58 s | 1.6x |
+| 4 | 4.48 s | 2.3x |
+| 8 | 3.61 s | 2.9x |
 
 The floor is the longest dependency chain: the slowest researcher, then the fact check, then the writer.
 

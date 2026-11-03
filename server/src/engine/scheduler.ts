@@ -18,6 +18,8 @@ export type SchedulerDeps = {
   workerId: string;
   pricing: Pricing;
   random?: () => number;
+  /** Keep private prompts/results out of other workspaces and provider connections. */
+  cacheNamespace?: string;
 };
 
 /**
@@ -170,7 +172,7 @@ export class RunScheduler {
       await this.writeStarted(id, attempt, prompt);
 
       const schema = def.output.type === "json" ? def.output.schema : undefined;
-      const key = def.cache ? cacheKey(this.deps.provider.model, prompt, def.tools, schema) : null;
+      const key = def.cache ? cacheKey(`${this.deps.cacheNamespace ?? ""}:${this.deps.provider.model}`, prompt, def.tools, schema) : null;
       const hit = key ? await this.deps.store.cacheGet(key) : null;
       if (hit) return this.succeed(id, attempt, hit.output, hit.sources, true);
 
@@ -217,6 +219,7 @@ export class RunScheduler {
     try {
       return await this.deps.provider.generate({
         prompt,
+        stepId: def.id,
         tools: def.tools.length ? def.tools : undefined,
         jsonSchema: schema,
         signal: attempt.signal,

@@ -6,7 +6,12 @@ import { useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api, ApiError } from "@/lib/api";
-import { formatCost, formatDuration, formatTokens, tryPrettyJson } from "@/lib/format";
+import {
+  formatCost,
+  formatDuration,
+  formatTokens,
+  tryPrettyJson,
+} from "@/lib/format";
 import { layoutGraph } from "@/lib/layout";
 import { reportMarkdown } from "@/lib/report";
 import { currentSteps, supersededSteps } from "@/lib/run-reducer";
@@ -31,17 +36,25 @@ export function RunView({ runId }: { runId: string }) {
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const active = state?.run.status === "planning" || state?.run.status === "running";
+  const active =
+    state?.run.status === "planning" || state?.run.status === "running";
   const now = useNow(!!active);
 
   const steps = useMemo(() => (state ? currentSteps(state) : []), [state]);
-  const replaced = useMemo(() => (state ? supersededSteps(state) : []), [state]);
+  const replaced = useMemo(
+    () => (state ? supersededSteps(state) : []),
+    [state],
+  );
   // Layout depends only on the graph's shape, which changes only when a re-plan installs a new version.
   const graphShape = state?.run.graph ?? null;
-  const layout = useMemo(() => (graphShape ? layoutGraph(graphShape) : null), [graphShape]);
+  const layout = useMemo(
+    () => (graphShape ? layoutGraph(graphShape) : null),
+    [graphShape],
+  );
 
   const followed = state ? autoSelectStep(state) : null;
-  const selectedId = (pinned && state?.steps[pinned] ? pinned : followed) ?? null;
+  const selectedId =
+    (pinned && state?.steps[pinned] ? pinned : followed) ?? null;
 
   // Picking a step writes it to the address bar, so the link points at what is being discussed.
   function pick(stepId: string | null) {
@@ -55,7 +68,10 @@ export function RunView({ runId }: { runId: string }) {
   useEffect(() => {
     if (!state) return;
     const label = state.run.goal ?? state.run.id;
-    document.title = active && steps.length > 0 ? `${done}/${steps.length} · ${label}` : `${statusWord(state.run.status)} · ${label}`;
+    document.title =
+      active && steps.length > 0
+        ? `${done}/${steps.length} · ${label}`
+        : `${statusWord(state.run.status)} · ${label}`;
     return () => {
       document.title = "Relay";
     };
@@ -66,7 +82,7 @@ export function RunView({ runId }: { runId: string }) {
       <div role="alert">
         <p className="error-box">{error}</p>
         <p style={{ marginTop: 12 }}>
-          <Link href="/" className="button" data-variant="quiet">
+          <Link href="/playground" className="button" data-variant="quiet">
             Back to all runs
           </Link>
         </p>
@@ -82,7 +98,9 @@ export function RunView({ runId }: { runId: string }) {
   const finalStep = finalId ? state.steps[finalId] : undefined;
   const elapsed = (active ? now : run.updatedAt) - run.createdAt;
   // Size the diagram to the laid-out graph instead of leaving a tall empty panel.
-  const panelHeight = layout ? Math.min(640, Math.max(300, layout.height + 90)) : 320;
+  const panelHeight = layout
+    ? Math.min(640, Math.max(300, layout.height + 90))
+    : 320;
   const report = finalStep?.output ?? null;
   const reportJson = report ? tryPrettyJson(report) : null;
   // A report cites what the researchers found, so the list belongs to the run, not one step.
@@ -94,13 +112,15 @@ export function RunView({ runId }: { runId: string }) {
     try {
       if (action === "delete") {
         await api.deleteRun(runId);
-        router.push("/");
+        router.push("/playground");
         return;
       }
       await (action === "cancel" ? api.cancelRun(runId) : api.retryRun(runId));
       refresh();
     } catch (err) {
-      setActionError(err instanceof ApiError ? err.message : "The request failed.");
+      setActionError(
+        err instanceof ApiError ? err.message : "The request failed.",
+      );
     } finally {
       setBusy(false);
     }
@@ -110,10 +130,22 @@ export function RunView({ runId }: { runId: string }) {
     <>
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div style={{ minWidth: 0, maxWidth: "80ch" }}>
-          <Link href="/" className="hint" style={{ textDecoration: "none" }}>
+          <Link
+            href="/playground"
+            className="hint"
+            style={{ textDecoration: "none" }}
+          >
             All runs
           </Link>
-          <h1 style={{ fontSize: 24, fontWeight: 800, lineHeight: 1.25, letterSpacing: "-0.01em", marginTop: 4 }}>
+          <h1
+            style={{
+              fontSize: 24,
+              fontWeight: 800,
+              lineHeight: 1.25,
+              letterSpacing: "-0.01em",
+              marginTop: 4,
+            }}
+          >
             {run.goal ?? `Graph of ${graph?.steps.length ?? 0} steps`}
           </h1>
           <p className="mono hint" style={{ marginTop: 2 }}>
@@ -122,38 +154,150 @@ export function RunView({ runId }: { runId: string }) {
         </div>
         <div className="flex flex-wrap gap-2">
           {active && (
-            <button className="button" data-variant="danger" disabled={busy} onClick={() => act("cancel")}>
+            <button
+              className="button"
+              data-variant="danger"
+              disabled={busy}
+              onClick={() => act("cancel")}
+            >
               Cancel run
             </button>
           )}
           {run.status === "failed" && (
-            <button className="button" disabled={busy} onClick={() => act("retry")}>
+            <button
+              className="button"
+              disabled={busy}
+              onClick={() => act("retry")}
+            >
               Retry failed steps
             </button>
           )}
           {run.goal && (
-            <Link className="button" data-variant="quiet" href={`/?goal=${encodeURIComponent(run.goal)}&profile=${run.profile ?? "research"}`}>
+            <Link
+              className="button"
+              data-variant="quiet"
+              href={`/playground?goal=${encodeURIComponent(run.goal)}&profile=${run.profile ?? "research"}`}
+            >
               Run again
             </Link>
           )}
-          {!active && <ConfirmButton label="Delete" confirmLabel="Delete for good" disabled={busy} onConfirm={() => act("delete")} />}
+          {!active && (
+            <ConfirmButton
+              label="Delete"
+              confirmLabel="Delete for good"
+              disabled={busy}
+              onConfirm={() => act("delete")}
+            />
+          )}
+          <DownloadButton
+            small
+            mime="application/json"
+            text={JSON.stringify(
+              {
+                version: 1,
+                run,
+                steps: Object.values(state.steps),
+                totals: state.totals,
+                events: state.events,
+              },
+              null,
+              2,
+            )}
+            filename={`${run.id}-trace.json`}
+            label="Export trace"
+          />
+          {graph && (
+            <DownloadButton
+              small
+              mime="application/json"
+              text={JSON.stringify({ steps: graph.steps }, null, 2)}
+              filename={`${run.id}-graph.json`}
+              label="Export graph"
+            />
+          )}
         </div>
       </div>
 
-      <dl className="flex flex-wrap gap-x-10 gap-y-3" style={{ marginTop: 20, paddingBottom: 16, borderBottom: "1px solid var(--rule)" }}>
-        <HeaderStat label="Status" value={<Status state={run.status} size="large" />} />
-        <HeaderStat label="Steps done" value={graph ? `${done} of ${steps.length}` : "Planning"} />
+      {run.execution && (
+        <div
+          className={run.execution.simulated ? "demo-note" : "execution-note"}
+          style={{ marginTop: 16 }}
+        >
+          <span
+            className="lamp"
+            data-state={run.execution.simulated ? "pending" : "succeeded"}
+          />
+          <p>
+            <strong>
+              {run.execution.simulated ? "Demo simulation" : run.execution.name}
+              .
+            </strong>{" "}
+            {run.execution.simulated
+              ? "Scripted responses through the real engine. No model API was called."
+              : `${run.execution.provider} / ${run.execution.model}`}
+          </p>
+        </div>
+      )}
+      <dl
+        className="flex flex-wrap gap-x-10 gap-y-3"
+        style={{
+          marginTop: 20,
+          paddingBottom: 16,
+          borderBottom: "1px solid var(--rule)",
+        }}
+      >
+        <HeaderStat
+          label="Status"
+          value={<Status state={run.status} size="large" />}
+        />
+        <HeaderStat
+          label="Steps done"
+          value={graph ? `${done} of ${steps.length}` : "Planning"}
+        />
         <HeaderStat label="Elapsed" value={formatDuration(elapsed)} />
-        <HeaderStat label="Tokens" value={formatTokens(state.totals.inputTokens + state.totals.outputTokens)} />
-        <HeaderStat label="Cost" value={formatCost(state.totals.costUsd)} />
-        {run.graphVersion > 1 && <HeaderStat label="Re-plans" value={String(run.replans)} />}
-        {run.budgetUsd !== null && <HeaderStat label="Budget" value={formatCost(run.budgetUsd)} />}
+        <HeaderStat
+          label="Tokens"
+          value={formatTokens(
+            state.totals.inputTokens + state.totals.outputTokens,
+          )}
+        />
+        <HeaderStat
+          label="Token cost estimate"
+          value={
+            run.execution &&
+            !run.execution.simulated &&
+            !run.execution.pricingConfigured
+              ? "Not configured"
+              : formatCost(state.totals.costUsd)
+          }
+        />
+        {run.graphVersion > 1 && (
+          <HeaderStat label="Re-plans" value={String(run.replans)} />
+        )}
+        {run.budgetUsd !== null && (
+          <HeaderStat label="Budget" value={formatCost(run.budgetUsd)} />
+        )}
         <HeaderStat
           label="Live updates"
           value={
-            <span className="inline-flex items-center gap-2" style={{ fontWeight: 400 }}>
-              <Lamp state={connection === "live" ? "succeeded" : connection === "reconnecting" ? "failed" : "pending"} />
-              {connection === "live" ? "Connected" : connection === "reconnecting" ? "Reconnecting" : "Connecting"}
+            <span
+              className="inline-flex items-center gap-2"
+              style={{ fontWeight: 400 }}
+            >
+              <Lamp
+                state={
+                  connection === "live"
+                    ? "succeeded"
+                    : connection === "reconnecting"
+                      ? "failed"
+                      : "pending"
+                }
+              />
+              {connection === "live"
+                ? "Connected"
+                : connection === "reconnecting"
+                  ? "Reconnecting"
+                  : "Connecting"}
             </span>
           }
         />
@@ -170,18 +314,42 @@ export function RunView({ runId }: { runId: string }) {
         </p>
       )}
 
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_380px]" style={{ marginTop: 20 }}>
+      <div
+        className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_380px]"
+        style={{ marginTop: 20 }}
+      >
         <div className="panel overflow-hidden" style={{ height: panelHeight }}>
           {graph ? (
-            <RunGraph graph={graph} layout={layout!} graphVersion={run.graphVersion} steps={state.steps} selectedId={selectedId} onSelect={pick} now={now} />
+            <RunGraph
+              graph={graph}
+              layout={layout!}
+              graphVersion={run.graphVersion}
+              steps={state.steps}
+              selectedId={selectedId}
+              onSelect={pick}
+              now={now}
+            />
           ) : (
-            <div className="flex h-full flex-col items-center justify-center gap-3" style={{ color: "var(--ink-2)" }}>
-              <Lamp state={run.status === "planning" ? "planning" : run.status} size="large" />
-              <p>{run.status === "planning" ? "The planner is designing the steps for this goal." : `Run ${statusWord(run.status).toLowerCase()} before a plan was ready.`}</p>
+            <div
+              className="flex h-full flex-col items-center justify-center gap-3"
+              style={{ color: "var(--ink-2)" }}
+            >
+              <Lamp
+                state={run.status === "planning" ? "planning" : run.status}
+                size="large"
+              />
+              <p>
+                {run.status === "planning"
+                  ? "The planner is designing the steps for this goal."
+                  : `Run ${statusWord(run.status).toLowerCase()} before a plan was ready.`}
+              </p>
             </div>
           )}
         </div>
-        <aside className="panel overflow-y-auto" style={{ maxHeight: Math.max(panelHeight, 480) }}>
+        <aside
+          className="panel overflow-y-auto"
+          style={{ maxHeight: Math.max(panelHeight, 480) }}
+        >
           <StepPanel
             def={graph?.steps.find((s) => s.id === selectedId)}
             step={selectedId ? state.steps[selectedId] : undefined}
@@ -191,14 +359,21 @@ export function RunView({ runId }: { runId: string }) {
           />
           {replaced.length > 0 && (
             <div style={{ padding: "0 20px 20px" }}>
-              <h3 style={{ fontWeight: 700, fontSize: 14, marginBottom: 6 }}>Replaced by re-planning</h3>
+              <h3 style={{ fontWeight: 700, fontSize: 14, marginBottom: 6 }}>
+                Replaced by re-planning
+              </h3>
               <ul className="flex flex-wrap gap-2">
                 {replaced.map((s) => (
                   <li key={s.stepId}>
                     <button
                       className="mono inline-flex items-center gap-2"
                       onClick={() => pick(s.stepId)}
-                      style={{ fontSize: 13, padding: "2px 8px", border: "1px dashed var(--rule-strong)", borderRadius: "var(--radius-s)" }}
+                      style={{
+                        fontSize: 13,
+                        padding: "2px 8px",
+                        border: "1px dashed var(--rule-strong)",
+                        borderRadius: "var(--radius-s)",
+                      }}
                     >
                       <Lamp state="superseded" />
                       {s.stepId}
@@ -212,7 +387,10 @@ export function RunView({ runId }: { runId: string }) {
       </div>
 
       <section className="panel" style={{ marginTop: 16 }}>
-        <div className="flex flex-wrap items-center justify-between gap-3" style={{ padding: "0 20px", borderBottom: "1px solid var(--rule)" }}>
+        <div
+          className="flex flex-wrap items-center justify-between gap-3"
+          style={{ padding: "0 20px", borderBottom: "1px solid var(--rule)" }}
+        >
           <div role="tablist" className="flex gap-6">
             {(["report", "timeline"] as const).map((t) => (
               <button
@@ -220,34 +398,64 @@ export function RunView({ runId }: { runId: string }) {
                 role="tab"
                 aria-selected={tab === t}
                 onClick={() => setTab(t)}
-                style={{ padding: "12px 0", fontWeight: 700, fontSize: 14, color: tab === t ? "var(--ink)" : "var(--ink-3)", borderBottom: `2px solid ${tab === t ? "var(--ink)" : "transparent"}`, marginBottom: -1 }}
+                style={{
+                  padding: "12px 0",
+                  fontWeight: 700,
+                  fontSize: 14,
+                  color: tab === t ? "var(--ink)" : "var(--ink-3)",
+                  borderBottom: `2px solid ${tab === t ? "var(--ink)" : "transparent"}`,
+                  marginBottom: -1,
+                }}
               >
-                {t === "report" ? "Result" : `Timeline (${state.events.length})`}
+                {t === "report"
+                  ? "Result"
+                  : `Timeline (${state.events.length})`}
               </button>
             ))}
           </div>
           {tab === "report" && report && (
             <div className="flex gap-2" style={{ paddingBottom: 6 }}>
               <CopyButton small text={report} label="Copy result" />
-              <DownloadButton small text={reportMarkdown(run.goal, report, sources)} filename={`${run.id}.md`} label="Download .md" />
+              <DownloadButton
+                small
+                text={reportMarkdown(run.goal, report, sources)}
+                filename={`${run.id}.md`}
+                label="Download .md"
+              />
             </div>
           )}
         </div>
         <div style={{ padding: 20 }}>
           {tab === "timeline" ? (
-            <Timeline events={state.events} startedAt={run.createdAt} onSelectStep={pick} />
+            <Timeline
+              events={state.events}
+              startedAt={run.createdAt}
+              onSelectStep={pick}
+            />
           ) : report ? (
             <>
               {reportJson ? (
                 <pre className="code-block">{reportJson}</pre>
               ) : (
                 <article className="markdown">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{report}</ReactMarkdown>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {report}
+                  </ReactMarkdown>
                 </article>
               )}
               {sources.length > 0 && (
-                <section style={{ marginTop: 24, borderTop: "1px solid var(--rule)", paddingTop: 16 }}>
-                  <h3 style={{ fontWeight: 700, fontSize: 14, marginBottom: 8 }}>Sources this run used</h3>
+                <section
+                  style={{
+                    marginTop: 24,
+                    borderTop: "1px solid var(--rule)",
+                    paddingTop: 16,
+                  }}
+                >
+                  <h3
+                    style={{ fontWeight: 700, fontSize: 14, marginBottom: 8 }}
+                  >
+                    Sources this run used
+                  </h3>
                   <SourceList sources={sources} fontSize={14} />
                 </section>
               )}
@@ -256,7 +464,8 @@ export function RunView({ runId }: { runId: string }) {
             <p className="hint">
               {finalDef ? (
                 <>
-                  The result appears here when <code className="mono">{finalDef.id}</code> finishes.
+                  The result appears here when{" "}
+                  <code className="mono">{finalDef.id}</code> finishes.
                 </>
               ) : (
                 "The result appears here once the run has a plan and its final step finishes."
@@ -277,7 +486,13 @@ function writeStepParam(stepId: string | null): void {
   window.history.replaceState(null, "", url);
 }
 
-function HeaderStat({ label, value }: { label: string; value: React.ReactNode }) {
+function HeaderStat({
+  label,
+  value,
+}: {
+  label: string;
+  value: React.ReactNode;
+}) {
   return (
     <div>
       <dt className="hint">{label}</dt>

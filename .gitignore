@@ -42,3 +42,8 @@ data
 # next.js
 .next
 next-env.d.ts
+.vercel
+test-results
+playwright-report
+.env*
+!.env.example

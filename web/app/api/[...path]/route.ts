@@ -20,8 +20,7 @@ async function handle(req: Request): Promise<Response> {
     relay = await getRelay();
   } catch (err) {
     console.error("[relay] could not start", err);
-    const message = err instanceof Error ? err.message : String(err);
-    return Response.json({ error: { code: "not_configured", message } }, { status: 500 });
+    return Response.json({ error: { code: "not_configured", message: "The engine could not start. Check DATABASE_URL and RELAY_SECRET in the deployment settings, or contact the site owner." } }, { status: 503 });
   }
   const { engine, api } = relay;
 

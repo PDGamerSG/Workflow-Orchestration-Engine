@@ -1,190 +1,364 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { api, ApiError } from "@/lib/api";
-import type { CreateRunRequest, Profile } from "@/lib/types";
-
-const EXAMPLE_GRAPH = JSON.stringify(
-  {
-    steps: [
-      { id: "pros", prompt: "List the strongest arguments for remote-first engineering teams." },
-      { id: "cons", prompt: "List the strongest arguments against remote-first engineering teams." },
-      {
-        id: "verdict",
-        prompt: "Weigh these and give a recommendation for a 20-person startup.\n\nFor:\n{{pros.output}}\n\nAgainst:\n{{cons.output}}",
-        final: true,
-      },
-    ],
-  },
-  null,
-  2,
-);
-
-const EXAMPLE_GOALS = [
-  "Should a two-person SaaS startup use SQLite or Postgres as its primary database?",
-  "What changed in the EU AI Act timeline this year, and who does each phase affect?",
-  "Compare Bun, Node and Deno for a CLI shipped to non-technical users.",
-];
-
-const PROFILES: { value: Profile; title: string; detail: string }[] = [
-  { value: "research", title: "Research report", detail: "Parallel researchers, a fact check, and a cited report." },
-  { value: "general", title: "Planned workflow", detail: "The planner designs the steps for any goal." },
-];
+import { TEMPLATES } from "@/lib/templates";
+import type { CreateRunRequest, Profile, PublicConnection } from "@/lib/types";
 
 export function NewRunForm() {
-  const router = useRouter();
-  // "Run again" links here with the old goal, so it can be edited before it starts.
   const params = useSearchParams();
-  const [mode, setMode] = useState<"goal" | "graph">("goal");
-  const [goal, setGoal] = useState(() => params.get("goal") ?? "");
-  const [profile, setProfile] = useState<Profile>(() => (params.get("profile") === "general" ? "general" : "research"));
-  const [graph, setGraph] = useState(EXAMPLE_GRAPH);
+  return (
+    <RunForm
+      key={params.toString()}
+      templateId={params.get("template")}
+      initialGoal={params.get("goal")}
+      initialProfile={params.get("profile")}
+      initialConnection={params.get("connection")}
+    />
+  );
+}
+
+function RunForm({
+  templateId,
+  initialGoal,
+  initialProfile,
+  initialConnection,
+}: {
+  templateId: string | null;
+  initialGoal: string | null;
+  initialProfile: string | null;
+  initialConnection: string | null;
+}) {
+  const router = useRouter();
+  const selectedTemplate = TEMPLATES.find((item) => item.id === templateId);
+  const [mode, setMode] = useState<"goal" | "graph">(
+    selectedTemplate ? "graph" : "goal",
+  );
+  const [goal, setGoal] = useState(initialGoal ?? "");
+  const [profile, setProfile] = useState<Profile>(
+    initialProfile === "general" ? "general" : "research",
+  );
+  const [graph, setGraph] = useState(
+    JSON.stringify((selectedTemplate ?? TEMPLATES[0]).graph, null, 2),
+  );
   const [concurrency, setConcurrency] = useState(4);
   const [maxReplans, setMaxReplans] = useState(2);
   const [budgetUsd, setBudgetUsd] = useState("");
+  const [budgetTokens, setBudgetTokens] = useState("");
+  const [connectionId, setConnectionId] = useState(initialConnection ?? "");
+  const [connections, setConnections] = useState<PublicConnection[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [scenario, setScenario] = useState<"success" | "retry">(
+    selectedTemplate?.scenario ?? "success",
+  );
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<{ message: string; issues: string[] } | null>(null);
+  const [error, setError] = useState<{
+    message: string;
+    issues: string[];
+  } | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    api.connections().then(
+      (saved) => {
+        if (alive) {
+          setConnections(saved);
+          setLoading(false);
+          if (
+            initialConnection &&
+            !saved.some((item) => item.id === initialConnection)
+          ) {
+            setConnectionId("");
+            setError({
+              message:
+                "That connection is not available in this browser. Choose a connection or use the demo.",
+              issues: [],
+            });
+          }
+        }
+      },
+      (error: Error) => {
+        if (alive) {
+          setError({ message: error.message, issues: [] });
+          setLoading(false);
+        }
+      },
+    );
+    return () => {
+      alive = false;
+    };
+  }, [initialConnection]);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
     setError(null);
-
-    const budget = budgetUsd.trim() ? { usd: Number(budgetUsd) } : undefined;
+    const budget =
+      budgetUsd.trim() || budgetTokens.trim()
+        ? {
+            ...(budgetUsd.trim() ? { usd: Number(budgetUsd) } : {}),
+            ...(budgetTokens.trim() ? { tokens: Number(budgetTokens) } : {}),
+          }
+        : undefined;
+    const common = {
+      concurrency,
+      budget,
+      connectionId: connectionId || null,
+      demoScenario: scenario,
+    };
     let body: CreateRunRequest;
-    if (mode === "goal") {
-      body = { goal: goal.trim(), profile, concurrency, maxReplans, budget };
-    } else {
+    if (mode === "goal")
+      body = { ...common, goal: goal.trim(), profile, maxReplans };
+    else {
       try {
-        body = { graph: JSON.parse(graph), concurrency, budget };
+        body = { ...common, graph: JSON.parse(graph) };
       } catch {
-        setError({ message: "The graph is not valid JSON.", issues: [] });
+        setError({
+          message:
+            "The graph is not valid JSON. Check its brackets, quotes and commas.",
+          issues: [],
+        });
         return;
       }
     }
-
     setSubmitting(true);
     try {
-      const runId = await api.createRun(body);
-      router.push(`/runs/${runId}`);
-    } catch (err) {
-      const apiError = err instanceof ApiError ? err : null;
-      setError({ message: apiError?.message ?? "Could not start the run.", issues: apiError?.issues ?? [] });
+      router.push(`/runs/${await api.createRun(body)}`);
+    } catch (error) {
+      const problem = error instanceof ApiError ? error : null;
+      setError({
+        message: problem?.message ?? "Could not start the run.",
+        issues: problem?.issues ?? [],
+      });
       setSubmitting(false);
     }
   }
 
   return (
-    <form onSubmit={submit} className="panel" style={{ padding: 24 }}>
-      <div className="flex flex-wrap items-baseline justify-between gap-3" style={{ marginBottom: 18 }}>
-        <h1 style={{ fontSize: 26, fontWeight: 800, letterSpacing: "-0.01em", lineHeight: 1.2 }}>Start a run</h1>
-        <div role="tablist" aria-label="How to define the run" className="inline-flex gap-1" style={{ background: "var(--panel-sunk)", padding: 3, borderRadius: "var(--radius-s)" }}>
-          {(["goal", "graph"] as const).map((m) => (
+    <form onSubmit={submit} className="panel run-form">
+      <div className="form-heading">
+        <div>
+          <h2>{selectedTemplate?.title ?? "Create a workflow"}</h2>
+          <p>
+            {selectedTemplate?.takeaway ??
+              "Choose what to run and how the engine should execute it."}
+          </p>
+        </div>
+        <div
+          className="segmented"
+          role="group"
+          aria-label="How to define the run"
+        >
+          {(["goal", "graph"] as const).map((item) => (
             <button
-              key={m}
+              key={item}
               type="button"
-              role="tab"
-              aria-selected={mode === m}
-              onClick={() => setMode(m)}
-              style={{
-                padding: "4px 12px",
-                borderRadius: "var(--radius-s)",
-                fontSize: 14,
-                fontWeight: mode === m ? 700 : 400,
-                background: mode === m ? "var(--panel)" : "transparent",
-                color: mode === m ? "var(--ink)" : "var(--ink-2)",
-              }}
+              aria-pressed={mode === item}
+              data-selected={mode === item || undefined}
+              onClick={() => setMode(item)}
             >
-              {m === "goal" ? "Describe a goal" : "Write the graph"}
+              {item === "goal" ? "Describe a goal" : "Graph JSON"}
             </button>
           ))}
         </div>
       </div>
-
+      <div className="execution-picker">
+        <div className="execution-select">
+          <label className="field-label" htmlFor="connection">
+            Run with
+          </label>
+          <select
+            id="connection"
+            className="input"
+            value={connectionId}
+            onChange={(event) => setConnectionId(event.target.value)}
+            disabled={loading}
+          >
+            <option value="">Demo simulation · no API key</option>
+            {connections.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.name} · {item.model}
+              </option>
+            ))}
+          </select>
+        </div>
+        <Link className="text-link" href="/connections">
+          {connections.length ? "Manage connections" : "Connect your API key"}
+        </Link>
+      </div>
+      {!connectionId && (
+        <div className="demo-note">
+          <span className="lamp" data-state="pending" />
+          <p>
+            <strong>Simulation mode.</strong> Replies are scripted. The
+            scheduler, checkpoints, retries and live events use the real engine.
+          </p>
+        </div>
+      )}
       {mode === "goal" ? (
         <>
           <label className="field-label" htmlFor="goal">
-            Goal
+            What would you like to work on?
           </label>
           <textarea
             id="goal"
-            className="textarea"
+            disabled={loading}
+            className="textarea goal-input"
             rows={3}
             required
             minLength={3}
-            placeholder="Should a two-person SaaS startup use SQLite or Postgres as its primary database?"
+            maxLength={4000}
+            placeholder="Compare SQLite and Postgres for a two-person SaaS startup. Include operating costs, failure modes and a recommendation."
             value={goal}
-            onChange={(e) => setGoal(e.target.value)}
-            onKeyDown={(e) => {
-              // Ctrl+Enter starts the run without reaching for the mouse.
-              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) e.currentTarget.form?.requestSubmit();
+            onChange={(event) => setGoal(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && (event.metaKey || event.ctrlKey))
+                event.currentTarget.form?.requestSubmit();
             }}
-            style={{ fontSize: 17 }}
           />
-
-          <div className="flex flex-wrap items-center gap-2" style={{ marginTop: 10 }}>
-            <span className="hint">Try</span>
-            {EXAMPLE_GOALS.map((example) => (
-              <button key={example} type="button" className="chip" onClick={() => setGoal(example)} title={example}>
-                <span className="line-clamp-1" style={{ maxWidth: 260 }}>
-                  {example}
-                </span>
+          <div className="example-goals">
+            <span className="hint">Try a goal</span>
+            {[
+              "Explain how Pi, Claude Code and Codex differ as agent runtimes.",
+              "Design a reliable workflow for reviewing a pull request.",
+            ].map((example) => (
+              <button
+                key={example}
+                type="button"
+                className="chip"
+                onClick={() => setGoal(example)}
+              >
+                {example}
               </button>
             ))}
           </div>
-
-          <fieldset style={{ marginTop: 18 }}>
-            <legend className="field-label">Workflow</legend>
-            <div className="grid gap-2 sm:grid-cols-2">
-              {PROFILES.map((p) => (
-                <label
-                  key={p.value}
-                  className="flex cursor-pointer gap-3"
-                  style={{
-                    padding: "10px 12px",
-                    border: `1px solid ${profile === p.value ? "var(--ink)" : "var(--rule)"}`,
-                    borderRadius: "var(--radius-s)",
-                    background: profile === p.value ? "var(--bg)" : "transparent",
-                  }}
-                >
-                  <input type="radio" name="profile" value={p.value} checked={profile === p.value} onChange={() => setProfile(p.value)} style={{ marginTop: 5, accentColor: "var(--ink)" }} />
-                  <span>
-                    <span style={{ fontWeight: 700 }}>{p.title}</span>
-                    <span className="hint block">{p.detail}</span>
-                  </span>
-                </label>
-              ))}
-            </div>
+          <fieldset className="profile-picker">
+            <legend className="field-label">Planning style</legend>
+            {[
+              {
+                id: "research",
+                title: "Research & review",
+                detail: "Parallel analysis, a fact check and a final report.",
+              },
+              {
+                id: "general",
+                title: "Flexible plan",
+                detail: "The planner designs a graph around your goal.",
+              },
+            ].map((item) => (
+              <label
+                key={item.id}
+                data-selected={profile === item.id || undefined}
+              >
+                <input
+                  type="radio"
+                  name="profile"
+                  value={item.id}
+                  checked={profile === item.id}
+                  onChange={() => setProfile(item.id as Profile)}
+                />
+                <span>
+                  <strong>{item.title}</strong>
+                  <small>{item.detail}</small>
+                </span>
+              </label>
+            ))}
           </fieldset>
         </>
       ) : (
         <>
           <label className="field-label" htmlFor="graph">
-            Graph JSON
+            Workflow graph
           </label>
-          <textarea id="graph" className="textarea mono" rows={14} spellCheck={false} value={graph} onChange={(e) => setGraph(e.target.value)} style={{ fontSize: 13 }} />
+          <textarea
+            id="graph"
+            disabled={loading}
+            className="textarea mono graph-input"
+            rows={15}
+            spellCheck={false}
+            required
+            value={graph}
+            onChange={(event) => setGraph(event.target.value)}
+          />
           <p className="hint" style={{ marginTop: 6 }}>
-            Reference another step with <code className="mono">{"{{step_id.output}}"}</code>. The engine adds the dependency for you.
+            Reference a saved output with <code>{"{{step_id.output}}"}</code>,
+            or a JSON field with <code>{"{{step_id.output.field}}"}</code>.
+            References add dependencies automatically.
           </p>
         </>
       )}
-
-      <div className="flex flex-wrap items-end gap-4" style={{ marginTop: 18 }}>
-        <NumberField id="concurrency" label="Steps at once" value={concurrency} min={1} max={16} onChange={setConcurrency} />
-        {mode === "goal" && <NumberField id="replans" label="Re-plans allowed" value={maxReplans} min={0} max={5} onChange={setMaxReplans} />}
-        <div>
-          <label className="field-label" htmlFor="budget">
-            Budget in USD
-          </label>
-          <input id="budget" className="input" type="number" min="0.01" step="0.01" placeholder="No limit" value={budgetUsd} onChange={(e) => setBudgetUsd(e.target.value)} style={{ width: 130 }} />
+      <details className="advanced-settings">
+        <summary>Execution settings & budgets</summary>
+        <div className="settings-grid">
+          <NumberField
+            id="concurrency"
+            label="Parallel steps"
+            value={concurrency}
+            min={1}
+            max={16}
+            onChange={setConcurrency}
+          />
+          {mode === "goal" && (
+            <NumberField
+              id="replans"
+              label="Replans allowed"
+              value={maxReplans}
+              min={0}
+              max={5}
+              onChange={setMaxReplans}
+            />
+          )}
+          <div>
+            <label className="field-label" htmlFor="budget-tokens">
+              Token budget
+            </label>
+            <input
+              id="budget-tokens"
+              className="input"
+              type="number"
+              min="1"
+              step="1"
+              placeholder="No limit"
+              value={budgetTokens}
+              onChange={(event) => setBudgetTokens(event.target.value)}
+            />
+          </div>
+          <div>
+            <label className="field-label" htmlFor="budget">
+              USD budget
+            </label>
+            <input
+              id="budget"
+              className="input"
+              type="number"
+              min="0.001"
+              step="0.001"
+              placeholder="No limit"
+              value={budgetUsd}
+              onChange={(event) => setBudgetUsd(event.target.value)}
+            />
+          </div>
         </div>
-        <button type="submit" className="button" disabled={submitting} style={{ marginLeft: "auto" }} title="Ctrl+Enter from the goal box">
-          {submitting ? "Starting" : "Start run"}
-        </button>
-      </div>
-
+        <p className="hint">
+          Budgets stop new steps. Calls already in flight may exceed the limit.
+          Dollar budgets require token prices on the connection.
+        </p>
+        {!connectionId && (
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={scenario === "retry"}
+              onChange={(event) =>
+                setScenario(event.target.checked ? "retry" : "success")
+              }
+            />
+            Simulate one temporary API failure to demonstrate retries
+          </label>
+        )}
+      </details>
       {error && (
-        <div className="error-box" role="alert" style={{ marginTop: 16 }}>
+        <div className="error-box" role="alert">
           <p style={{ fontWeight: 700 }}>{error.message}</p>
           {error.issues.length > 0 && (
             <ul style={{ marginTop: 4, paddingLeft: 18, listStyle: "disc" }}>
@@ -197,25 +371,66 @@ export function NewRunForm() {
           )}
         </div>
       )}
+      <div className="form-submit">
+        <p className="hint">
+          {connectionId
+            ? "Uses your provider’s API quota."
+            : "Free simulation. No provider charges."}
+          <span className="hidden sm:inline">
+            {" "}
+            Saved in this browser workspace.
+          </span>
+        </p>
+        <button
+          type="submit"
+          className="button"
+          disabled={submitting || loading}
+        >
+          {submitting
+            ? "Starting…"
+            : connectionId
+              ? "Start model run"
+              : "Start demo run"}
+          <span aria-hidden="true">↗</span>
+        </button>
+      </div>
     </form>
   );
 }
 
-function NumberField(props: { id: string; label: string; value: number; min: number; max: number; onChange: (n: number) => void }) {
+function NumberField({
+  id,
+  label,
+  value,
+  min,
+  max,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  onChange: (value: number) => void;
+}) {
   return (
     <div>
-      <label className="field-label" htmlFor={props.id}>
-        {props.label}
+      <label className="field-label" htmlFor={id}>
+        {label}
       </label>
       <input
-        id={props.id}
+        id={id}
         className="input"
         type="number"
-        min={props.min}
-        max={props.max}
-        value={props.value}
-        onChange={(e) => props.onChange(Math.min(props.max, Math.max(props.min, Number(e.target.value) || props.min)))}
-        style={{ width: 96 }}
+        min={min}
+        max={max}
+        value={value}
+        required
+        onChange={(event) =>
+          onChange(
+            Math.min(max, Math.max(min, Number(event.target.value) || min)),
+          )
+        }
       />
     </div>
   );

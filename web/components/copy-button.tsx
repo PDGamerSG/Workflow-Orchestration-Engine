@@ -3,11 +3,22 @@
 import { useEffect, useRef, useState } from "react";
 
 /** Copies `text` to the clipboard and says so for a moment. Falls back to a hidden textarea. */
-export function CopyButton({ text, label = "Copy", small }: { text: string; label?: string; small?: boolean }) {
+export function CopyButton({
+  text,
+  label = "Copy",
+  small,
+}: {
+  text: string;
+  label?: string;
+  small?: boolean;
+}) {
   const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  useEffect(() => () => void (timer.current && clearTimeout(timer.current)), []);
+  useEffect(
+    () => () => void (timer.current && clearTimeout(timer.current)),
+    [],
+  );
 
   async function copy() {
     let ok = true;
@@ -22,15 +33,40 @@ export function CopyButton({ text, label = "Copy", small }: { text: string; labe
   }
 
   return (
-    <button type="button" className="button" data-variant="quiet" data-size={small ? "small" : undefined} onClick={copy} aria-live="polite">
-      {state === "copied" ? "Copied" : state === "failed" ? "Press Ctrl+C" : label}
+    <button
+      type="button"
+      className="button"
+      data-variant="quiet"
+      data-size={small ? "small" : undefined}
+      onClick={copy}
+      aria-live="polite"
+    >
+      {state === "copied"
+        ? "Copied"
+        : state === "failed"
+          ? "Press Ctrl+C"
+          : label}
     </button>
   );
 }
 
-export function DownloadButton({ text, filename, label = "Download", small }: { text: string; filename: string; label?: string; small?: boolean }) {
+export function DownloadButton({
+  text,
+  filename,
+  label = "Download",
+  small,
+  mime = "text/markdown",
+}: {
+  text: string;
+  filename: string;
+  label?: string;
+  small?: boolean;
+  mime?: string;
+}) {
   function download() {
-    const url = URL.createObjectURL(new Blob([text], { type: "text/markdown;charset=utf-8" }));
+    const url = URL.createObjectURL(
+      new Blob([text], { type: `${mime};charset=utf-8` }),
+    );
     const link = document.createElement("a");
     link.href = url;
     link.download = filename;
@@ -40,7 +76,13 @@ export function DownloadButton({ text, filename, label = "Download", small }: { 
   }
 
   return (
-    <button type="button" className="button" data-variant="quiet" data-size={small ? "small" : undefined} onClick={download}>
+    <button
+      type="button"
+      className="button"
+      data-variant="quiet"
+      data-size={small ? "small" : undefined}
+      onClick={download}
+    >
       {label}
     </button>
   );
