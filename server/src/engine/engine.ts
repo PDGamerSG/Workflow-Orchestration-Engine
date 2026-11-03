@@ -10,7 +10,7 @@ import { validateGraph } from "./graph";
 import { newRunId } from "./ids";
 import { TokenBucket } from "./rate-limiter";
 import { RunScheduler, type FailureHook, type SchedulerDeps } from "./scheduler";
-import type { Store } from "./store";
+import type { RunContext, Store } from "./store";
 import { TERMINAL_RUN_STATUSES, type Clock } from "./types";
 
 export type EngineOptions = {
@@ -27,7 +27,11 @@ export type EngineOptions = {
   random?: () => number;
   /** Needed for goal runs and for re-planning failed branches. */
   planner?: Planner;
+  /** Rebuilt from persisted run context on creation, retry, and lease takeover. */
+  resolveRuntime?: (runId: string) => Promise<RunRuntime>;
 };
+
+export type RunRuntime = Pick<SchedulerDeps, "provider" | "pricing"> & Partial<Pick<SchedulerDeps, "limiter" | "cacheNamespace">> & { planner?: Planner };
 
 export const CreateRunSchema = z
   .object({
@@ -70,6 +74,7 @@ export class Engine {
   private readonly sweepMs: number;
   private readonly schedulerDeps: SchedulerDeps;
   private readonly planner?: Planner;
+  private readonly resolveRuntime?: EngineOptions["resolveRuntime"];
   private readonly active = new Map<string, ActiveRun>();
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -83,6 +88,7 @@ export class Engine {
     this.heartbeatMs = opts.heartbeatMs ?? 10_000;
     this.sweepMs = opts.sweepMs ?? 5_000;
     this.planner = opts.planner;
+    this.resolveRuntime = opts.resolveRuntime;
     this.schedulerDeps = {
       store: opts.store,
       provider: opts.provider,
@@ -122,7 +128,7 @@ export class Engine {
     await Promise.allSettled(running.map((r) => r.done));
   }
 
-  async createRun(input: CreateRunInput): Promise<{ runId: string }> {
+  async createRun(input: CreateRunInput, context: RunContext = {}): Promise<{ runId: string }> {
     const parsed = CreateRunSchema.safeParse(input);
     if (!parsed.success) {
       throw new ValidationError(parsed.error.issues.map((i) => (i.path.length ? `${i.path.join(".")}: ${i.message}` : i.message)));
@@ -131,6 +137,7 @@ export class Engine {
     const now = this.clock.now();
     const runId = newRunId(now);
     const common = {
+      ...context,
       id: runId,
       concurrency: req.concurrency,
       budgetTokens: req.budget?.tokens ?? null,
@@ -139,7 +146,7 @@ export class Engine {
     };
 
     if (req.goal !== undefined) {
-      if (!this.planner) throw new ValidationError(["planning is not configured"], "planning is not configured");
+      if (!this.planner && !this.resolveRuntime) throw new ValidationError(["planning is not configured"], "planning is not configured");
       await this.store.createRun({ ...common, goal: req.goal, profile: req.profile, status: "planning", maxReplans: req.maxReplans });
       await this.emit(runId, [["run.created", { graph: null, goal: req.goal, profile: req.profile }]]);
     } else {
@@ -294,9 +301,18 @@ export class Engine {
     );
     if (!claimed) return;
 
-    if ((await this.store.getRun(runId))!.status === "planning" && !(await this.planRun(runId, signal))) return;
+    let runtime: { deps: SchedulerDeps; planner?: Planner };
+    try {
+      const resolved = await this.resolveRuntime?.(runId);
+      runtime = { deps: { ...this.schedulerDeps, ...resolved }, planner: resolved?.planner ?? this.planner };
+    } catch {
+      await this.failPlanning(runId, "The saved provider connection is unavailable. Restore the connection or start a new run.", [], null);
+      return;
+    }
 
-    const scheduler = new RunScheduler(runId, this.schedulerDeps, { onStepFailed: this.replanHook(runId) });
+    if ((await this.store.getRun(runId))!.status === "planning" && !(await this.planRun(runId, signal, runtime))) return;
+
+    const scheduler = new RunScheduler(runId, runtime.deps, { onStepFailed: this.replanHook(runId, runtime) });
     const result = await scheduler.run(signal);
 
     const reason = signal.reason;
@@ -306,17 +322,17 @@ export class Engine {
   }
 
   /** Builds the graph for a goal run. Returns true when the run is ready to schedule. */
-  private async planRun(runId: string, signal: AbortSignal): Promise<boolean> {
+  private async planRun(runId: string, signal: AbortSignal, runtime: { deps: SchedulerDeps; planner?: Planner }): Promise<boolean> {
     const run = (await this.store.getRun(runId))!;
-    if (!this.planner || !run.goal || !run.profile) {
+    if (!runtime.planner || !run.goal || !run.profile) {
       await this.failPlanning(runId, "planning is not configured", [], null);
       return false;
     }
 
     try {
-      const { graph, usage, attempts } = await this.planner.plan(run.goal, run.profile, signal);
+      const { graph, usage, attempts } = await runtime.planner.plan(run.goal, run.profile, signal);
       if (signal.aborted) return false;
-      const cost = costUsd(usage, this.schedulerDeps.pricing);
+      const cost = costUsd(usage, runtime.deps.pricing);
       const now = this.clock.now();
       const done = await commit(
         this.schedulerDeps,
@@ -331,27 +347,27 @@ export class Engine {
     } catch (err) {
       // Shutdown, cancel or a lost lease: whoever holds the run next plans it again.
       if (signal.aborted) return false;
-      if (err instanceof PlanningError) await this.failPlanning(runId, `planning failed: ${err.message}`, err.issues, err.usage);
+      if (err instanceof PlanningError) await this.failPlanning(runId, `planning failed: ${err.message}`, err.issues, err.usage, runtime.deps.pricing);
       else await this.failPlanning(runId, `planning failed: ${err instanceof Error ? err.message : String(err)}`, [], null);
       return false;
     }
   }
 
-  private async failPlanning(runId: string, error: string, issues: string[], usage: PlanningError["usage"] | null): Promise<void> {
+  private async failPlanning(runId: string, error: string, issues: string[], usage: PlanningError["usage"] | null, pricing = this.schedulerDeps.pricing): Promise<void> {
     const totals = await this.store.totals(runId);
     await commit(
       this.schedulerDeps,
       runId,
       async () =>
-        (!usage || (await this.store.addPlanningUsage(runId, usage, costUsd(usage, this.schedulerDeps.pricing), this.workerId))) &&
+        (!usage || (await this.store.addPlanningUsage(runId, usage, costUsd(usage, pricing), this.workerId))) &&
         (await this.store.setRunStatus(runId, "failed", error, this.clock.now(), this.workerId)),
       [["run.failed", { error, issues, totals }]],
     );
   }
 
   /** Replaces a failed branch through the planner while the run has re-plans left. */
-  private replanHook(runId: string): FailureHook | undefined {
-    const planner = this.planner;
+  private replanHook(runId: string, runtime: { deps: SchedulerDeps; planner?: Planner }): FailureHook | undefined {
+    const planner = runtime.planner;
     if (!planner) return undefined;
 
     return async (stepId, error, signal) => {
@@ -372,7 +388,7 @@ export class Engine {
           signal,
         );
         const version = run.graphVersion + 1;
-        const cost = costUsd(result.usage, this.schedulerDeps.pricing);
+        const cost = costUsd(result.usage, runtime.deps.pricing);
         const done = await commit(
           this.schedulerDeps,
           runId,
@@ -398,7 +414,7 @@ export class Engine {
       } catch (err) {
         if (signal.aborted) return false;
         if (err instanceof PlanningError) {
-          await this.store.addPlanningUsage(runId, err.usage, costUsd(err.usage, this.schedulerDeps.pricing), this.workerId);
+          await this.store.addPlanningUsage(runId, err.usage, costUsd(err.usage, runtime.deps.pricing), this.workerId);
         }
         await this.emit(runId, [["run.replan_failed", { stepId, error: err instanceof Error ? err.message : String(err) }]]);
         return false;

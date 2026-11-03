@@ -2,7 +2,10 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { Db, Queryable } from "./db";
 import type { NormalizedGraph, Profile, RunStatus, Source, StepStatus, Usage } from "./types";
 
-export type NewRun = {
+export type ExecutionIdentity = { provider: string; model: string; name: string; simulated: boolean; scenario?: "success" | "retry" };
+export type RunContext = { ownerId?: string | null; connectionId?: string | null; execution?: ExecutionIdentity };
+
+export type NewRun = RunContext & {
   id: string;
   goal: string | null;
   profile: Profile | null;
@@ -31,6 +34,7 @@ export type RunRow = {
   leaseExpiresAt: number | null;
   createdAt: number;
   updatedAt: number;
+  execution?: ExecutionIdentity;
 };
 
 export type StepRow = {
@@ -88,6 +92,11 @@ CREATE TABLE IF NOT EXISTS runs (
   updated_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS runs_status ON runs (status, lease_expires_at);
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS owner_id TEXT;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS connection_id TEXT;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS execution_json TEXT;
+CREATE INDEX IF NOT EXISTS runs_owner_created ON runs (owner_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS runs_connection ON runs (connection_id);
 
 CREATE TABLE IF NOT EXISTS steps (
   run_id TEXT NOT NULL,
@@ -194,9 +203,9 @@ export class Store {
 
   async createRun(r: NewRun): Promise<void> {
     await this.q(
-      `INSERT INTO runs (id, goal, profile, status, concurrency, max_replans, budget_tokens, budget_usd, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [r.id, r.goal, r.profile, r.status, r.concurrency, r.maxReplans, r.budgetTokens, r.budgetUsd, r.now, r.now],
+      `INSERT INTO runs (id, goal, profile, status, concurrency, max_replans, budget_tokens, budget_usd, created_at, updated_at, owner_id, connection_id, execution_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [r.id, r.goal, r.profile, r.status, r.concurrency, r.maxReplans, r.budgetTokens, r.budgetUsd, r.now, r.now, r.ownerId ?? null, r.connectionId ?? null, r.execution ? JSON.stringify(r.execution) : null],
     );
   }
 
@@ -206,8 +215,19 @@ export class Store {
   }
 
   /** Recent runs with step counts and totals, in two queries however many runs there are. */
-  async listRuns(limit: number): Promise<RunSummary[]> {
-    const { rows } = await this.q("SELECT * FROM runs ORDER BY created_at DESC, id DESC LIMIT ?", [limit]);
+  async getRunContext(id: string): Promise<RunContext | null> {
+    const { rows } = await this.q("SELECT owner_id, connection_id, execution_json FROM runs WHERE id = ?", [id]);
+    const row = rows[0];
+    return row ? { ownerId: row.owner_id as string | null, connectionId: row.connection_id as string | null, ...(row.execution_json ? { execution: JSON.parse(row.execution_json as string) as ExecutionIdentity } : {}) } : null;
+  }
+
+  async countActiveRuns(ownerId: string): Promise<number> {
+    const { rows } = await this.q<{ n: number }>("SELECT COUNT(*)::int AS n FROM runs WHERE owner_id = ? AND status IN ('planning','running')", [ownerId]);
+    return rows[0]!.n;
+  }
+
+  async listRuns(limit: number, ownerId?: string): Promise<RunSummary[]> {
+    const { rows } = await this.q(`SELECT * FROM runs ${ownerId ? "WHERE owner_id = ?" : ""} ORDER BY created_at DESC, id DESC LIMIT ?`, ownerId ? [ownerId, limit] : [limit]);
     const runs = rows.map(toRun);
     const { rows: groups } = await this.q<{ run_id: string; status: StepStatus; n: number; i: number; o: number; s: number; c: number }>(
       `SELECT run_id, status, COUNT(*)::int AS n, SUM(input_tokens)::float8 AS i, SUM(output_tokens)::float8 AS o,
@@ -470,6 +490,7 @@ function toRun(r: Record<string, unknown>): RunRow {
     leaseExpiresAt: numOrNull(r.lease_expires_at),
     createdAt: num(r.created_at),
     updatedAt: num(r.updated_at),
+    ...(r.execution_json ? { execution: JSON.parse(r.execution_json as string) as ExecutionIdentity } : {}),
   };
 }
 

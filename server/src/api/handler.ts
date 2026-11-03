@@ -1,12 +1,14 @@
 import type { Engine } from "../engine/engine";
 import { ConflictError, NotFoundError, ValidationError } from "../engine/errors";
-import type { Store } from "../engine/store";
+import type { RunContext, Store } from "../engine/store";
 
 export type ApiDeps = {
   engine: Engine;
   store: Store;
   /** Path prefix the routes are mounted under, such as "/api". */
   basePath?: string;
+  ownerId?: string;
+  prepareRun?: (input: unknown) => Promise<RunContext>;
 };
 
 const MAX_BODY_BYTES = 1_000_000;
@@ -17,7 +19,7 @@ const EVENT_PAGE = 500;
  * function or a test without a server. Events are read in pages after a cursor: the
  * dashboard polls for them instead of holding a stream open.
  */
-export function createApi({ engine, store, basePath = "" }: ApiDeps): (req: Request) => Promise<Response> {
+export function createApi({ engine, store, basePath = "", ownerId, prepareRun }: ApiDeps): (req: Request) => Promise<Response> {
   return async (req) => {
     try {
       const url = new URL(req.url);
@@ -26,16 +28,23 @@ export function createApi({ engine, store, basePath = "" }: ApiDeps): (req: Requ
       const route = `${req.method} /${parts.map((p, i) => (i === 1 && parts[0] === "runs" ? ":id" : p)).join("/")}`;
       const id = parts[1] ?? "";
 
+      if (ownerId && parts[0] === "runs" && id && (await store.getRunContext(id))?.ownerId !== ownerId) {
+        throw new NotFoundError("Run not found in this browser workspace.");
+      }
+
       switch (route) {
         case "GET /health":
           return json(200, { ok: true, workerId: engine.workerId });
 
-        case "POST /runs":
-          return json(201, await engine.createRun((await readJson(req)) ?? {}));
+        case "POST /runs": {
+          const input = (await readJson(req)) ?? {};
+          const context = await prepareRun?.(input);
+          return json(201, await engine.createRun(input, context));
+        }
 
         case "GET /runs": {
           const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 50, 1), 200);
-          return json(200, { runs: await store.listRuns(limit) });
+          return json(200, { runs: await store.listRuns(limit, ownerId) });
         }
 
         case "GET /runs/:id": {
@@ -91,7 +100,7 @@ class BadBody extends Error {
   }
 }
 
-async function readJson(req: Request): Promise<unknown> {
+export async function readJson(req: Request): Promise<unknown> {
   const text = await req.text();
   if (new TextEncoder().encode(text).length > MAX_BODY_BYTES) throw new BadBody(413, "too_large", "request body is larger than 1mb");
   if (!text.trim()) return undefined;
@@ -104,7 +113,7 @@ async function readJson(req: Request): Promise<unknown> {
 
 type ErrorBody = { code: string; message: string; issues?: string[] };
 
-function toHttpError(err: unknown): { status: number; body: ErrorBody } {
+export function toHttpError(err: unknown): { status: number; body: ErrorBody } {
   if (err instanceof ValidationError) {
     const code = err.message === "invalid graph" ? "invalid_graph" : "invalid_request";
     return { status: 400, body: { code, message: err.message, issues: err.issues } };

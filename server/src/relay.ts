@@ -1,6 +1,9 @@
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { createApi } from "./api/handler";
+import { createPlatformApi } from "./platform/api";
+import { Connections } from "./platform/connections";
+import { RuntimeRegistry } from "./platform/runtime";
+import { applicationSecret } from "./platform/secret";
 import { loadConfig, type Config } from "./config";
 import { openPglite, openPostgres, type Db } from "./engine/db";
 import { Engine } from "./engine/engine";
@@ -16,6 +19,7 @@ export type Relay = {
   db: Db;
   store: Store;
   engine: Engine;
+  connections: Connections;
   api: (req: Request) => Promise<Response>;
 };
 
@@ -39,7 +43,7 @@ export async function createRelay(
   env: Record<string, string | undefined>,
   opts: { basePath?: string; onPool?: (pool: import("pg").Pool) => void } = {},
 ): Promise<Relay> {
-  const config = loadConfig(env);
+  const config = loadConfig({ LLM_PROVIDER: "demo", ...env });
   let db: Db;
   if (config.databaseUrl) {
     const postgres = await openPostgres(config.databaseUrl);
@@ -51,7 +55,9 @@ export async function createRelay(
     db = await openPglite(dir);
   }
   const store = await Store.open(db);
+  const connections = await Connections.open(db, applicationSecret(env, config.pgliteDir));
   const provider = createProvider(config);
+  const runtimes = new RuntimeRegistry({ store, connections, demo: createDemoProvider({ failureRate: config.demoFailureRate }) });
   const engine = new Engine({
     store,
     provider,
@@ -61,9 +67,10 @@ export async function createRelay(
     leaseTtlMs: config.leaseTtlMs,
     // Renew three times per lease period so one slow heartbeat never loses the run.
     heartbeatMs: Math.floor(config.leaseTtlMs / 3),
+    resolveRuntime: runtimes.resolve,
   });
   console.log(
     `[relay] worker ${engine.workerId} (provider: ${config.provider}/${provider.model}, search: ${config.searchEnabled ? "on" : "off"}, db: ${config.databaseUrl ? "postgres" : "pglite"})`,
   );
-  return { config, db, store, engine, api: createApi({ engine, store, basePath: opts.basePath }) };
+  return { config, db, store, engine, connections, api: createPlatformApi({ engine, store, connections, basePath: opts.basePath }) };
 }
