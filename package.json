@@ -1,11 +1,15 @@
 {
   "name": "relay",
   "private": true,
+  "packageManager": "bun@1.4.4",
   "type": "module",
   "workspaces": [
     "server",
     "web"
   ],
+  "overrides": {
+    "zod": "4.6.7"
+  },
   "scripts": {
     "dev": "bun --filter '@relay/web' dev",
     "test": "bun --filter '*' test",

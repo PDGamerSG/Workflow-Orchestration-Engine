@@ -7,14 +7,15 @@
     "start": "next start --port 3000",
     "lint": "eslint",
     "typecheck": "next typegen && tsc --noEmit",
-    "test": "bun test lib"
+    "test": "bun test lib",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@dagrejs/dagre": "3.1.1",
     "@relay/server": "workspace:*",
     "@vercel/functions": "^3.9.9",
     "@xyflow/react": "12.11.6",
-    "next": "16.3.6",
+    "next": "16.4.5",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "react-markdown": "^10.1.0",
@@ -22,12 +23,13 @@
     "server-only": "^0.0.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.1",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^26.6.0",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
-    "eslint-config-next": "16.3.6",
+    "eslint-config-next": "16.4.5",
     "tailwindcss": "^4",
     "typescript": "^5"
   },
