@@ -203,6 +203,7 @@ function RunForm({
           </label>
           <textarea
             id="goal"
+            disabled={loading}
             className="textarea goal-input"
             rows={3}
             required
@@ -272,6 +273,7 @@ function RunForm({
           </label>
           <textarea
             id="graph"
+            disabled={loading}
             className="textarea mono graph-input"
             rows={15}
             spellCheck={false}

@@ -1,5 +1,32 @@
 import { expect, test } from "@playwright/test";
 
+test("workflow inputs wait for workspace initialization before accepting edits", async ({
+  page,
+}) => {
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route("**/api/connections", async (route) => {
+    await ready;
+    await route.continue();
+  });
+  try {
+    await page.goto("/playground?template=engine-tour");
+    await expect(page.getByLabel("Workflow graph")).toBeDisabled();
+  } finally {
+    release();
+  }
+  await expect(page.getByLabel("Workflow graph")).toBeEnabled();
+  const graph = '{"steps":[{"id":"one","prompt":"{{one.output}}"}]}';
+  await page.getByLabel("Workflow graph").fill(graph);
+  await expect(page.getByLabel("Workflow graph")).toHaveValue(graph);
+  await page.getByRole("button", { name: "Start demo run" }).click();
+  await expect(
+    page.getByRole("alert").filter({ hasText: "invalid graph" }),
+  ).toContainText("references itself");
+});
+
 test("a visitor launches the tour, inspects a step and exports the result", async ({
   page,
 }) => {
