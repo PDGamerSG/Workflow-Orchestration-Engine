@@ -9,7 +9,7 @@ Verification date: 2026-11-04. Commands run against the release branch; no paid 
 | Web library tests | 37 passed, 0 failed. |
 | Type checking and lint | Passed for both workspaces / web lint. |
 | Production Next.js build | Passed. |
-| Chromium end-to-end | 6 passed locally. Cases cover initialization-safe editing, demo/export, retry, validation/cancel/delete, workspace isolation and responsive labelled controls. The original five also passed against the deployed release; the added regression is verified with the updated source. |
+| Chromium end-to-end | 6 passed locally and against the final public deployment: initialization-safe editing, demo/export, retry, validation/cancel/delete, workspace isolation and responsive labelled controls. |
 | Crash demo | Completed steps 1–3 retained; interrupted step 4 attempted twice; no completed step repeated; successor completed. |
 | Benchmark | Simulated 12-step workload: 10.40 s at concurrency 1, 4.48 s at 4, 3.61 s at 8. Mixed graph: Relay 3.83 s vs level-by-level 4.61 s. |
 | Production dependency audit | No vulnerabilities reported after patches. |
@@ -34,3 +34,8 @@ The verified public release is [relay-workflows-rust.vercel.app](https://relay-w
 Namecheap saved `CNAME relay → 8e7efbe083a6a848.vercel-dns-017.com.` with Automatic TTL at 2026-11-03 22:03:20 UTC. Other records were preserved. Both authoritative DNS and a public resolver returned the new target, and Vercel confirmed the domain was configured correctly for `relay-workflows`. During the single 180-second propagation window, the local resolver/browser retained NXDOMAIN and HTTPS checks with normal TLS validation and explicit resolved IPs failed during handshake. No HTTPS/custom-host browser success is claimed. Further retries were stopped at that deadline; use the verified public alias until that external check is completed.
 
 GitHub CI exposed early editing before React hydration. The failure artifact showed inserted text combined with the initial graph. A delayed-connections browser regression failed before the fix; disabling the two textareas until initialization completes made it pass. The complete six-case local browser suite, type checking, lint and production build passed after the fix.
+
+
+## Final deployed source
+
+Source `8369140` (application fix `2d7c11d`) is deployed as `dpl_6r7bw3CnPBRhX4ujiLUaeLa1YarK`: `https://relay-workflows-rfu4adbdo-pallab-das-projects-d3f377fd.vercel.app`. Vercel reported READY. The public alias returned a healthy API, and all six Playwright cases passed in 35.3 seconds. Its eight JS/CSS assets exactly matched the protected immutable release fetched through authenticated Vercel access. This report update changes documentation only; it does not change the deployed application.
