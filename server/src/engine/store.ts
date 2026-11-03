@@ -1,9 +1,28 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Db, Queryable } from "./db";
-import type { NormalizedGraph, Profile, RunStatus, Source, StepStatus, Usage } from "./types";
+import { ConflictError, NotFoundError } from "./errors";
+import type {
+  NormalizedGraph,
+  Profile,
+  RunStatus,
+  Source,
+  StepStatus,
+  Usage,
+} from "./types";
 
-export type ExecutionIdentity = { provider: string; model: string; name: string; simulated: boolean; scenario?: "success" | "retry" };
-export type RunContext = { ownerId?: string | null; connectionId?: string | null; execution?: ExecutionIdentity };
+export type ExecutionIdentity = {
+  provider: string;
+  model: string;
+  name: string;
+  simulated: boolean;
+  scenario?: "success" | "retry";
+  pricingConfigured?: boolean;
+};
+export type RunContext = {
+  ownerId?: string | null;
+  connectionId?: string | null;
+  execution?: ExecutionIdentity;
+};
 
 export type NewRun = RunContext & {
   id: string;
@@ -57,17 +76,39 @@ export type StepRow = {
 };
 
 export type StepPatch = Partial<
-  Pick<StepRow, "status" | "attempt" | "resolvedPrompt" | "output" | "sources" | "error" | "cached" | "startedAt" | "finishedAt">
+  Pick<
+    StepRow,
+    | "status"
+    | "attempt"
+    | "resolvedPrompt"
+    | "output"
+    | "sources"
+    | "error"
+    | "cached"
+    | "startedAt"
+    | "finishedAt"
+  >
 >;
 
-export type Totals = { inputTokens: number; outputTokens: number; searchCalls: number; costUsd: number };
+export type Totals = {
+  inputTokens: number;
+  outputTokens: number;
+  searchCalls: number;
+  costUsd: number;
+};
 
 export type RunSummary = Omit<RunRow, "graph"> & {
   stepCounts: Record<StepStatus, number>;
   totals: Totals;
 };
 
-export type EventRow = { id: number; runId: string; type: string; payload: unknown; createdAt: number };
+export type EventRow = {
+  id: number;
+  runId: string;
+  type: string;
+  payload: unknown;
+  createdAt: number;
+};
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS runs (
@@ -97,6 +138,7 @@ ALTER TABLE runs ADD COLUMN IF NOT EXISTS connection_id TEXT;
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS execution_json TEXT;
 CREATE INDEX IF NOT EXISTS runs_owner_created ON runs (owner_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS runs_connection ON runs (connection_id);
+CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY);
 
 CREATE TABLE IF NOT EXISTS steps (
   run_id TEXT NOT NULL,
@@ -153,7 +195,14 @@ const STEP_COLUMNS: Record<keyof StepPatch, string> = {
   finishedAt: "finished_at",
 };
 
-const ALL_STEP_STATUSES: StepStatus[] = ["pending", "running", "succeeded", "failed", "skipped", "superseded"];
+const ALL_STEP_STATUSES: StepStatus[] = [
+  "pending",
+  "running",
+  "succeeded",
+  "failed",
+  "skipped",
+  "superseded",
+];
 
 /** Writes SQL with `?` placeholders, numbered here into Postgres's `$1, $2, ...`. */
 function numbered(sql: string): string {
@@ -180,7 +229,10 @@ export class Store {
     return this.db.close();
   }
 
-  private async q<T = Record<string, unknown>>(sql: string, params: unknown[] = []) {
+  private async q<T = Record<string, unknown>>(
+    sql: string,
+    params: unknown[] = [],
+  ) {
     return (this.current.getStore() ?? this.db).query<T>(numbered(sql), params);
   }
 
@@ -189,12 +241,18 @@ export class Store {
    * run is serialized across processes and its events get ids in commit order. A call inside an
    * open transaction joins it.
    */
-  async tx<T>(fn: () => Promise<T>, opts: { lockRun?: string; readOnly?: boolean } = {}): Promise<T> {
+  async tx<T>(
+    fn: () => Promise<T>,
+    opts: { lockRun?: string; readOnly?: boolean } = {},
+  ): Promise<T> {
     if (this.current.getStore()) return fn();
     return this.db.transaction(
       (tx) =>
         this.current.run(tx, async () => {
-          if (opts.lockRun) await this.q("SELECT 1 FROM runs WHERE id = ? FOR UPDATE", [opts.lockRun]);
+          if (opts.lockRun)
+            await this.q("SELECT 1 FROM runs WHERE id = ? FOR UPDATE", [
+              opts.lockRun,
+            ]);
           return fn();
         }),
       { readOnly: opts.readOnly },
@@ -202,10 +260,57 @@ export class Store {
   }
 
   async createRun(r: NewRun): Promise<void> {
+    if (r.ownerId) {
+      // Engine calls this inside its creation transaction. A row lock also works in PGlite,
+      // unlike provider-specific advisory locks, and serializes submissions across workers.
+      await this.q(
+        "INSERT INTO workspaces (id) VALUES (?) ON CONFLICT DO NOTHING",
+        [r.ownerId],
+      );
+      await this.q("SELECT id FROM workspaces WHERE id = ? FOR UPDATE", [
+        r.ownerId,
+      ]);
+      const { rows } = await this.q<{ active: number; total: number }>(
+        "SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE status IN ('planning','running'))::int AS active FROM runs WHERE owner_id = ?",
+        [r.ownerId],
+      );
+      if (rows[0]!.active >= 3)
+        throw new ConflictError(
+          "This workspace already has 3 active runs. Wait or cancel one first.",
+        );
+      if (rows[0]!.total >= 100)
+        throw new ConflictError(
+          "Remove an old run before keeping more than 100 runs in this workspace.",
+        );
+      if (r.connectionId) {
+        const connection = await this.q(
+          "SELECT id FROM connections WHERE id = ? AND owner_id = ? FOR UPDATE",
+          [r.connectionId, r.ownerId],
+        );
+        if (!connection.rows.length)
+          throw new NotFoundError(
+            "Connection not found in this browser workspace.",
+          );
+      }
+    }
     await this.q(
       `INSERT INTO runs (id, goal, profile, status, concurrency, max_replans, budget_tokens, budget_usd, created_at, updated_at, owner_id, connection_id, execution_json)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [r.id, r.goal, r.profile, r.status, r.concurrency, r.maxReplans, r.budgetTokens, r.budgetUsd, r.now, r.now, r.ownerId ?? null, r.connectionId ?? null, r.execution ? JSON.stringify(r.execution) : null],
+      [
+        r.id,
+        r.goal,
+        r.profile,
+        r.status,
+        r.concurrency,
+        r.maxReplans,
+        r.budgetTokens,
+        r.budgetUsd,
+        r.now,
+        r.now,
+        r.ownerId ?? null,
+        r.connectionId ?? null,
+        r.execution ? JSON.stringify(r.execution) : null,
+      ],
     );
   }
 
@@ -216,20 +321,49 @@ export class Store {
 
   /** Recent runs with step counts and totals, in two queries however many runs there are. */
   async getRunContext(id: string): Promise<RunContext | null> {
-    const { rows } = await this.q("SELECT owner_id, connection_id, execution_json FROM runs WHERE id = ?", [id]);
+    const { rows } = await this.q(
+      "SELECT owner_id, connection_id, execution_json FROM runs WHERE id = ?",
+      [id],
+    );
     const row = rows[0];
-    return row ? { ownerId: row.owner_id as string | null, connectionId: row.connection_id as string | null, ...(row.execution_json ? { execution: JSON.parse(row.execution_json as string) as ExecutionIdentity } : {}) } : null;
+    return row
+      ? {
+          ownerId: row.owner_id as string | null,
+          connectionId: row.connection_id as string | null,
+          ...(row.execution_json
+            ? {
+                execution: JSON.parse(
+                  row.execution_json as string,
+                ) as ExecutionIdentity,
+              }
+            : {}),
+        }
+      : null;
   }
 
   async countActiveRuns(ownerId: string): Promise<number> {
-    const { rows } = await this.q<{ n: number }>("SELECT COUNT(*)::int AS n FROM runs WHERE owner_id = ? AND status IN ('planning','running')", [ownerId]);
+    const { rows } = await this.q<{ n: number }>(
+      "SELECT COUNT(*)::int AS n FROM runs WHERE owner_id = ? AND status IN ('planning','running')",
+      [ownerId],
+    );
     return rows[0]!.n;
   }
 
   async listRuns(limit: number, ownerId?: string): Promise<RunSummary[]> {
-    const { rows } = await this.q(`SELECT * FROM runs ${ownerId ? "WHERE owner_id = ?" : ""} ORDER BY created_at DESC, id DESC LIMIT ?`, ownerId ? [ownerId, limit] : [limit]);
+    const { rows } = await this.q(
+      `SELECT * FROM runs ${ownerId ? "WHERE owner_id = ?" : ""} ORDER BY created_at DESC, id DESC LIMIT ?`,
+      ownerId ? [ownerId, limit] : [limit],
+    );
     const runs = rows.map(toRun);
-    const { rows: groups } = await this.q<{ run_id: string; status: StepStatus; n: number; i: number; o: number; s: number; c: number }>(
+    const { rows: groups } = await this.q<{
+      run_id: string;
+      status: StepStatus;
+      n: number;
+      i: number;
+      o: number;
+      s: number;
+      c: number;
+    }>(
       `SELECT run_id, status, COUNT(*)::int AS n, SUM(input_tokens)::float8 AS i, SUM(output_tokens)::float8 AS o,
               SUM(search_calls)::float8 AS s, SUM(cost_usd)::float8 AS c
        FROM steps WHERE run_id = ANY(?) GROUP BY run_id, status`,
@@ -237,7 +371,9 @@ export class Store {
     );
 
     return runs.map(({ graph: _graph, ...run }, i) => {
-      const stepCounts = Object.fromEntries(ALL_STEP_STATUSES.map((s) => [s, 0])) as Record<StepStatus, number>;
+      const stepCounts = Object.fromEntries(
+        ALL_STEP_STATUSES.map((s) => [s, 0]),
+      ) as Record<StepStatus, number>;
       const steps = { i: 0, o: 0, s: 0, c: 0 };
       for (const g of groups) {
         if (g.run_id !== run.id) continue;
@@ -247,23 +383,50 @@ export class Store {
         steps.s += g.s;
         steps.c += g.c;
       }
-      return { ...run, stepCounts, totals: sumTotals(steps, planningOf(rows[i]!)) };
+      return {
+        ...run,
+        stepCounts,
+        totals: sumTotals(steps, planningOf(rows[i]!)),
+      };
     });
   }
 
-  setRunStatus(id: string, status: RunStatus, error: string | null, now: number, fence?: string): Promise<boolean> {
-    return this.guarded("UPDATE runs SET status = ?, error = ?, updated_at = ? WHERE id = ?", [status, error, now, id], id, fence);
+  setRunStatus(
+    id: string,
+    status: RunStatus,
+    error: string | null,
+    now: number,
+    fence?: string,
+  ): Promise<boolean> {
+    return this.guarded(
+      "UPDATE runs SET status = ?, error = ?, updated_at = ? WHERE id = ?",
+      [status, error, now, id],
+      id,
+      fence,
+    );
   }
 
   incrementReplans(id: string, fence?: string): Promise<boolean> {
-    return this.guarded("UPDATE runs SET replans = replans + 1 WHERE id = ?", [id], id, fence);
+    return this.guarded(
+      "UPDATE runs SET replans = replans + 1 WHERE id = ?",
+      [id],
+      id,
+      fence,
+    );
   }
 
   /**
    * Makes `graph` the run's current graph. Steps new to this version are inserted as pending,
    * ids in `supersede` are retired, and rows that already exist keep their state.
    */
-  installGraph(runId: string, graph: NormalizedGraph, version: number, supersede: string[], now: number, fence?: string): Promise<boolean> {
+  installGraph(
+    runId: string,
+    graph: NormalizedGraph,
+    version: number,
+    supersede: string[],
+    now: number,
+    fence?: string,
+  ): Promise<boolean> {
     return this.tx(async () => {
       const updated = await this.guarded(
         "UPDATE runs SET graph_json = ?, graph_version = ?, updated_at = ? WHERE id = ?",
@@ -274,9 +437,15 @@ export class Store {
       if (!updated) return false;
 
       for (const id of supersede) {
-        await this.q("UPDATE steps SET status = 'superseded' WHERE run_id = ? AND step_id = ?", [runId, id]);
+        await this.q(
+          "UPDATE steps SET status = 'superseded' WHERE run_id = ? AND step_id = ?",
+          [runId, id],
+        );
       }
-      const { rows } = await this.q<{ next: number }>("SELECT COALESCE(MAX(seq), -1) + 1 AS next FROM steps WHERE run_id = ?", [runId]);
+      const { rows } = await this.q<{ next: number }>(
+        "SELECT COALESCE(MAX(seq), -1) + 1 AS next FROM steps WHERE run_id = ?",
+        [runId],
+      );
       const next = rows[0]!.next;
       for (const [i, id] of graph.order.entries()) {
         await this.q(
@@ -289,30 +458,66 @@ export class Store {
   }
 
   async getSteps(runId: string): Promise<StepRow[]> {
-    const { rows } = await this.q("SELECT * FROM steps WHERE run_id = ? ORDER BY seq", [runId]);
+    const { rows } = await this.q(
+      "SELECT * FROM steps WHERE run_id = ? ORDER BY seq",
+      [runId],
+    );
     return rows.map(toStep);
   }
 
-  updateStep(runId: string, stepId: string, patch: StepPatch, fence?: string): Promise<boolean> {
-    const entries = Object.entries(patch) as [keyof StepPatch, StepPatch[keyof StepPatch]][];
+  updateStep(
+    runId: string,
+    stepId: string,
+    patch: StepPatch,
+    fence?: string,
+  ): Promise<boolean> {
+    const entries = Object.entries(patch) as [
+      keyof StepPatch,
+      StepPatch[keyof StepPatch],
+    ][];
     if (entries.length === 0) return Promise.resolve(true);
     const sets = entries.map(([key]) => `${STEP_COLUMNS[key]} = ?`).join(", ");
-    const values = entries.map(([key, value]) => (key === "sources" ? JSON.stringify(value) : value));
-    return this.guarded(`UPDATE steps SET ${sets} WHERE run_id = ? AND step_id = ?`, [...values, runId, stepId], runId, fence);
-  }
-
-  addStepUsage(runId: string, stepId: string, usage: Usage, costUsd: number, fence?: string): Promise<boolean> {
+    const values = entries.map(([key, value]) =>
+      key === "sources" ? JSON.stringify(value) : value,
+    );
     return this.guarded(
-      `UPDATE steps SET input_tokens = input_tokens + ?, output_tokens = output_tokens + ?,
-         search_calls = search_calls + ?, cost_usd = cost_usd + ?
-       WHERE run_id = ? AND step_id = ?`,
-      [usage.inputTokens, usage.outputTokens, usage.searchCalls, costUsd, runId, stepId],
+      `UPDATE steps SET ${sets} WHERE run_id = ? AND step_id = ?`,
+      [...values, runId, stepId],
       runId,
       fence,
     );
   }
 
-  addPlanningUsage(runId: string, usage: Usage, costUsd: number, fence?: string): Promise<boolean> {
+  addStepUsage(
+    runId: string,
+    stepId: string,
+    usage: Usage,
+    costUsd: number,
+    fence?: string,
+  ): Promise<boolean> {
+    return this.guarded(
+      `UPDATE steps SET input_tokens = input_tokens + ?, output_tokens = output_tokens + ?,
+         search_calls = search_calls + ?, cost_usd = cost_usd + ?
+       WHERE run_id = ? AND step_id = ?`,
+      [
+        usage.inputTokens,
+        usage.outputTokens,
+        usage.searchCalls,
+        costUsd,
+        runId,
+        stepId,
+      ],
+      runId,
+      fence,
+    );
+  }
+
+  addPlanningUsage(
+    runId: string,
+    usage: Usage,
+    costUsd: number,
+    fence?: string,
+  ): Promise<boolean> {
     return this.guarded(
       `UPDATE runs SET planning_input_tokens = planning_input_tokens + ?,
          planning_output_tokens = planning_output_tokens + ?, planning_cost_usd = planning_cost_usd + ?
@@ -327,7 +532,13 @@ export class Store {
    * Moves steps in any of `from` to `to`, clearing error and finish time. Returns the count moved.
    * `clearAttempts` restarts the retry count, which a manual retry of a failed run needs.
    */
-  async resetSteps(runId: string, from: StepStatus[], to: StepStatus, fence?: string, clearAttempts = false): Promise<number> {
+  async resetSteps(
+    runId: string,
+    from: StepStatus[],
+    to: StepStatus,
+    fence?: string,
+    clearAttempts = false,
+  ): Promise<number> {
     const attempts = clearAttempts ? ", attempt = 0" : "";
     let sql = `UPDATE steps SET status = ?, error = NULL, finished_at = NULL${attempts} WHERE run_id = ? AND status = ANY(?)`;
     const params: unknown[] = [to, runId, from];
@@ -343,30 +554,60 @@ export class Store {
    * One read transaction keeps the rows and the cursor consistent, so a client that reads
    * events after `lastEventId` sees every later change exactly once.
    */
-  snapshot(runId: string): Promise<{ run: RunRow; steps: StepRow[]; totals: Totals; lastEventId: number } | null> {
+  snapshot(
+    runId: string,
+  ): Promise<{
+    run: RunRow;
+    steps: StepRow[];
+    totals: Totals;
+    lastEventId: number;
+  } | null> {
     return this.tx(
       async () => {
         const run = await this.getRun(runId);
         if (!run) return null;
-        const { rows } = await this.q<{ last: string }>("SELECT COALESCE(MAX(id), 0) AS last FROM events WHERE run_id = ?", [runId]);
-        return { run, steps: await this.getSteps(runId), totals: await this.totals(runId), lastEventId: Number(rows[0]!.last) };
+        const { rows } = await this.q<{ last: string }>(
+          "SELECT COALESCE(MAX(id), 0) AS last FROM events WHERE run_id = ?",
+          [runId],
+        );
+        return {
+          run,
+          steps: await this.getSteps(runId),
+          totals: await this.totals(runId),
+          lastEventId: Number(rows[0]!.last),
+        };
       },
       { readOnly: true },
     );
   }
 
   async totals(runId: string): Promise<Totals> {
-    const { rows } = await this.q<{ i: number; o: number; s: number; c: number }>(
+    const { rows } = await this.q<{
+      i: number;
+      o: number;
+      s: number;
+      c: number;
+    }>(
       `SELECT COALESCE(SUM(input_tokens), 0)::float8 AS i, COALESCE(SUM(output_tokens), 0)::float8 AS o,
               COALESCE(SUM(search_calls), 0)::float8 AS s, COALESCE(SUM(cost_usd), 0)::float8 AS c
        FROM steps WHERE run_id = ?`,
       [runId],
     );
-    const { rows: runRows } = await this.q("SELECT * FROM runs WHERE id = ?", [runId]);
-    return sumTotals(rows[0]!, runRows[0] ? planningOf(runRows[0]) : { i: 0, o: 0, c: 0 });
+    const { rows: runRows } = await this.q("SELECT * FROM runs WHERE id = ?", [
+      runId,
+    ]);
+    return sumTotals(
+      rows[0]!,
+      runRows[0] ? planningOf(runRows[0]) : { i: 0, o: 0, c: 0 },
+    );
   }
 
-  async appendEvent(runId: string, type: string, payload: unknown, now: number): Promise<number> {
+  async appendEvent(
+    runId: string,
+    type: string,
+    payload: unknown,
+    now: number,
+  ): Promise<number> {
     const { rows } = await this.q<{ id: string }>(
       "INSERT INTO events (run_id, type, payload_json, created_at) VALUES (?, ?, ?, ?) RETURNING id",
       [runId, type, JSON.stringify(payload), now],
@@ -374,8 +615,15 @@ export class Store {
     return Number(rows[0]!.id);
   }
 
-  async eventsAfter(runId: string, afterId: number, limit = 500): Promise<EventRow[]> {
-    const { rows } = await this.q("SELECT * FROM events WHERE run_id = ? AND id > ? ORDER BY id LIMIT ?", [runId, afterId, limit]);
+  async eventsAfter(
+    runId: string,
+    afterId: number,
+    limit = 500,
+  ): Promise<EventRow[]> {
+    const { rows } = await this.q(
+      "SELECT * FROM events WHERE run_id = ? AND id > ? ORDER BY id LIMIT ?",
+      [runId, afterId, limit],
+    );
     return rows.map((r) => ({
       id: Number(r.id),
       runId: r.run_id as string,
@@ -385,7 +633,12 @@ export class Store {
     }));
   }
 
-  async claimRun(runId: string, workerId: string, now: number, ttlMs: number): Promise<boolean> {
+  async claimRun(
+    runId: string,
+    workerId: string,
+    now: number,
+    ttlMs: number,
+  ): Promise<boolean> {
     const { rowCount } = await this.q(
       `UPDATE runs SET lease_owner = ?, lease_expires_at = ?
        WHERE id = ? AND status IN ('planning', 'running')
@@ -395,13 +648,24 @@ export class Store {
     return rowCount === 1;
   }
 
-  async heartbeat(runId: string, workerId: string, now: number, ttlMs: number): Promise<boolean> {
-    const { rowCount } = await this.q("UPDATE runs SET lease_expires_at = ? WHERE id = ? AND lease_owner = ?", [now + ttlMs, runId, workerId]);
+  async heartbeat(
+    runId: string,
+    workerId: string,
+    now: number,
+    ttlMs: number,
+  ): Promise<boolean> {
+    const { rowCount } = await this.q(
+      "UPDATE runs SET lease_expires_at = ? WHERE id = ? AND lease_owner = ?",
+      [now + ttlMs, runId, workerId],
+    );
     return rowCount === 1;
   }
 
   async releaseRun(runId: string, workerId: string): Promise<void> {
-    await this.q("UPDATE runs SET lease_owner = NULL, lease_expires_at = NULL WHERE id = ? AND lease_owner = ?", [runId, workerId]);
+    await this.q(
+      "UPDATE runs SET lease_owner = NULL, lease_expires_at = NULL WHERE id = ? AND lease_owner = ?",
+      [runId, workerId],
+    );
   }
 
   async claimableRuns(now: number): Promise<string[]> {
@@ -419,20 +683,34 @@ export class Store {
     return this.tx(async () => {
       await this.q("DELETE FROM events WHERE run_id = ?", [runId]);
       await this.q("DELETE FROM steps WHERE run_id = ?", [runId]);
-      return (await this.q("DELETE FROM runs WHERE id = ?", [runId])).rowCount > 0;
+      return (
+        (await this.q("DELETE FROM runs WHERE id = ?", [runId])).rowCount > 0
+      );
     });
   }
 
-  async cacheGet(key: string): Promise<{ output: string; sources: Source[] } | null> {
-    const { rows } = await this.q<{ output: string; sources_json: string | null }>(
-      "SELECT output, sources_json FROM step_cache WHERE key = ?",
-      [key],
-    );
+  async cacheGet(
+    key: string,
+  ): Promise<{ output: string; sources: Source[] } | null> {
+    const { rows } = await this.q<{
+      output: string;
+      sources_json: string | null;
+    }>("SELECT output, sources_json FROM step_cache WHERE key = ?", [key]);
     const row = rows[0];
-    return row ? { output: row.output, sources: row.sources_json ? JSON.parse(row.sources_json) : [] } : null;
+    return row
+      ? {
+          output: row.output,
+          sources: row.sources_json ? JSON.parse(row.sources_json) : [],
+        }
+      : null;
   }
 
-  async cachePut(key: string, output: string, sources: Source[], now: number): Promise<void> {
+  async cachePut(
+    key: string,
+    output: string,
+    sources: Source[],
+    now: number,
+  ): Promise<void> {
     await this.q(
       `INSERT INTO step_cache (key, output, sources_json, created_at) VALUES (?, ?, ?, ?)
        ON CONFLICT (key) DO UPDATE SET output = EXCLUDED.output, sources_json = EXCLUDED.sources_json, created_at = EXCLUDED.created_at`,
@@ -440,7 +718,12 @@ export class Store {
     );
   }
 
-  private async guarded(sql: string, params: unknown[], runId: string, fence?: string): Promise<boolean> {
+  private async guarded(
+    sql: string,
+    params: unknown[],
+    runId: string,
+    fence?: string,
+  ): Promise<boolean> {
     if (fence) {
       sql += ` AND ${FENCE}`;
       params = [...params, runId, fence];
@@ -450,10 +733,17 @@ export class Store {
 }
 
 function planningOf(r: Record<string, unknown>) {
-  return { i: Number(r.planning_input_tokens), o: Number(r.planning_output_tokens), c: Number(r.planning_cost_usd) };
+  return {
+    i: Number(r.planning_input_tokens),
+    o: Number(r.planning_output_tokens),
+    c: Number(r.planning_cost_usd),
+  };
 }
 
-function sumTotals(steps: { i: number; o: number; s: number; c: number }, planning: { i: number; o: number; c: number }): Totals {
+function sumTotals(
+  steps: { i: number; o: number; s: number; c: number },
+  planning: { i: number; o: number; c: number },
+): Totals {
   return {
     inputTokens: steps.i + planning.i,
     outputTokens: steps.o + planning.o,
@@ -477,7 +767,9 @@ function toRun(r: Record<string, unknown>): RunRow {
     id: r.id as string,
     goal: r.goal as string | null,
     profile: r.profile as Profile | null,
-    graph: r.graph_json ? (JSON.parse(r.graph_json as string) as NormalizedGraph) : null,
+    graph: r.graph_json
+      ? (JSON.parse(r.graph_json as string) as NormalizedGraph)
+      : null,
     graphVersion: r.graph_version as number,
     status: r.status as RunStatus,
     error: r.error as string | null,
@@ -490,7 +782,13 @@ function toRun(r: Record<string, unknown>): RunRow {
     leaseExpiresAt: numOrNull(r.lease_expires_at),
     createdAt: num(r.created_at),
     updatedAt: num(r.updated_at),
-    ...(r.execution_json ? { execution: JSON.parse(r.execution_json as string) as ExecutionIdentity } : {}),
+    ...(r.execution_json
+      ? {
+          execution: JSON.parse(
+            r.execution_json as string,
+          ) as ExecutionIdentity,
+        }
+      : {}),
   };
 }
 
@@ -503,7 +801,9 @@ function toStep(r: Record<string, unknown>): StepRow {
     attempt: r.attempt as number,
     resolvedPrompt: r.resolved_prompt as string | null,
     output: r.output as string | null,
-    sources: r.sources_json ? (JSON.parse(r.sources_json as string) as Source[]) : [],
+    sources: r.sources_json
+      ? (JSON.parse(r.sources_json as string) as Source[])
+      : [],
     error: r.error as string | null,
     inputTokens: num(r.input_tokens),
     outputTokens: num(r.output_tokens),

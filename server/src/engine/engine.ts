@@ -9,7 +9,11 @@ import { commit, type PendingEvent } from "./events";
 import { validateGraph } from "./graph";
 import { newRunId } from "./ids";
 import { TokenBucket } from "./rate-limiter";
-import { RunScheduler, type FailureHook, type SchedulerDeps } from "./scheduler";
+import {
+  RunScheduler,
+  type FailureHook,
+  type SchedulerDeps,
+} from "./scheduler";
 import type { RunContext, Store } from "./store";
 import { TERMINAL_RUN_STATUSES, type Clock } from "./types";
 
@@ -31,7 +35,10 @@ export type EngineOptions = {
   resolveRuntime?: (runId: string) => Promise<RunRuntime>;
 };
 
-export type RunRuntime = Pick<SchedulerDeps, "provider" | "pricing"> & Partial<Pick<SchedulerDeps, "limiter" | "cacheNamespace">> & { planner?: Planner };
+export type RunRuntime = Pick<SchedulerDeps, "provider" | "pricing"> &
+  Partial<Pick<SchedulerDeps, "limiter" | "cacheNamespace">> & {
+    planner?: Planner;
+  };
 
 export const CreateRunSchema = z
   .object({
@@ -47,7 +54,9 @@ export const CreateRunSchema = z
       })
       .optional(),
   })
-  .refine((v) => (v.graph === undefined) !== (v.goal === undefined), { message: "provide exactly one of graph or goal" });
+  .refine((v) => (v.graph === undefined) !== (v.goal === undefined), {
+    message: "provide exactly one of graph or goal",
+  });
 
 export type CreateRunInput = z.input<typeof CreateRunSchema>;
 
@@ -128,10 +137,17 @@ export class Engine {
     await Promise.allSettled(running.map((r) => r.done));
   }
 
-  async createRun(input: CreateRunInput, context: RunContext = {}): Promise<{ runId: string }> {
+  async createRun(
+    input: CreateRunInput,
+    context: RunContext = {},
+  ): Promise<{ runId: string }> {
     const parsed = CreateRunSchema.safeParse(input);
     if (!parsed.success) {
-      throw new ValidationError(parsed.error.issues.map((i) => (i.path.length ? `${i.path.join(".")}: ${i.message}` : i.message)));
+      throw new ValidationError(
+        parsed.error.issues.map((i) =>
+          i.path.length ? `${i.path.join(".")}: ${i.message}` : i.message,
+        ),
+      );
     }
     const req = parsed.data;
     const now = this.clock.now();
@@ -145,21 +161,48 @@ export class Engine {
       now,
     };
 
-    if (req.goal !== undefined) {
-      if (!this.planner && !this.resolveRuntime) throw new ValidationError(["planning is not configured"], "planning is not configured");
-      await this.store.createRun({ ...common, goal: req.goal, profile: req.profile, status: "planning", maxReplans: req.maxReplans });
-      await this.emit(runId, [["run.created", { graph: null, goal: req.goal, profile: req.profile }]]);
-    } else {
-      const checked = validateGraph(req.graph);
-      if (!checked.ok) throw new ValidationError(checked.issues, "invalid graph");
-      await this.store.tx(async () => {
-        await this.store.createRun({ ...common, goal: null, profile: null, status: "running", maxReplans: 0 });
-        await this.store.installGraph(runId, checked.graph, 1, [], now);
-      });
-      await this.emit(runId, [["run.created", { graph: checked.graph, goal: null, profile: null }]]);
-    }
+    await this.store.tx(async () => {
+      if (req.goal !== undefined) {
+        if (!this.planner && !this.resolveRuntime)
+          throw new ValidationError(
+            ["planning is not configured"],
+            "planning is not configured",
+          );
+        await this.store.createRun({
+          ...common,
+          goal: req.goal,
+          profile: req.profile,
+          status: "planning",
+          maxReplans: req.maxReplans,
+        });
+        await this.emit(runId, [
+          [
+            "run.created",
+            { graph: null, goal: req.goal, profile: req.profile },
+          ],
+        ]);
+      } else {
+        const checked = validateGraph(req.graph);
+        if (!checked.ok)
+          throw new ValidationError(checked.issues, "invalid graph");
+        await this.store.tx(async () => {
+          await this.store.createRun({
+            ...common,
+            goal: null,
+            profile: null,
+            status: "running",
+            maxReplans: 0,
+          });
+          await this.store.installGraph(runId, checked.graph, 1, [], now);
+        });
+        await this.emit(runId, [
+          ["run.created", { graph: checked.graph, goal: null, profile: null }],
+        ]);
+      }
+    });
 
-    if (await this.store.claimRun(runId, this.workerId, now, this.leaseTtlMs)) this.launch(runId, null);
+    if (await this.store.claimRun(runId, this.workerId, now, this.leaseTtlMs))
+      this.launch(runId, null);
     return { runId };
   }
 
@@ -168,19 +211,33 @@ export class Engine {
     const run = await this.store.getRun(runId);
     if (!run) throw new NotFoundError(`run ${runId} not found`);
 
-    const unfinished = (await this.store.getSteps(runId)).filter((s) => s.status === "pending" || s.status === "running");
+    const unfinished = (await this.store.getSteps(runId)).filter(
+      (s) => s.status === "pending" || s.status === "running",
+    );
     const done = await commit(
       this.schedulerDeps,
       runId,
       async () => {
         const current = (await this.store.getRun(runId))!;
         if (TERMINAL_RUN_STATUSES.includes(current.status)) return false;
-        await this.store.setRunStatus(runId, "cancelled", null, this.clock.now());
-        for (const s of unfinished) await this.store.updateStep(runId, s.stepId, { status: "skipped", error: "cancelled" });
+        await this.store.setRunStatus(
+          runId,
+          "cancelled",
+          null,
+          this.clock.now(),
+        );
+        for (const s of unfinished)
+          await this.store.updateStep(runId, s.stepId, {
+            status: "skipped",
+            error: "cancelled",
+          });
         return true;
       },
       [
-        ...unfinished.map((s): PendingEvent => ["step.skipped", { stepId: s.stepId, reason: "cancelled" }]),
+        ...unfinished.map((s): PendingEvent => [
+          "step.skipped",
+          { stepId: s.stepId, reason: "cancelled" },
+        ]),
         ["run.cancelled", { totals: await this.store.totals(runId) }],
       ],
     );
@@ -200,16 +257,38 @@ export class Engine {
       async () => {
         const current = (await this.store.getRun(runId))!;
         if (current.status !== "failed") return false;
-        await this.store.resetSteps(runId, ["failed", "skipped"], "pending", undefined, true);
+        await this.store.resetSteps(
+          runId,
+          ["failed", "skipped"],
+          "pending",
+          undefined,
+          true,
+        );
         // A run that failed while planning has no graph yet, so it goes back to planning.
-        await this.store.setRunStatus(runId, current.graph ? "running" : "planning", null, this.clock.now());
+        await this.store.setRunStatus(
+          runId,
+          current.graph ? "running" : "planning",
+          null,
+          this.clock.now(),
+        );
         return true;
       },
       [["run.retried", {}]],
     );
-    if (!done) throw new ConflictError(`only failed runs can be retried, run ${runId} is ${run.status}`);
+    if (!done)
+      throw new ConflictError(
+        `only failed runs can be retried, run ${runId} is ${run.status}`,
+      );
 
-    if (await this.store.claimRun(runId, this.workerId, this.clock.now(), this.leaseTtlMs)) this.launch(runId, null);
+    if (
+      await this.store.claimRun(
+        runId,
+        this.workerId,
+        this.clock.now(),
+        this.leaseTtlMs,
+      )
+    )
+      this.launch(runId, null);
   }
 
   /** Removes a finished run and everything it wrote. An unfinished run has to be cancelled first. */
@@ -217,7 +296,9 @@ export class Engine {
     const run = await this.store.getRun(runId);
     if (!run) throw new NotFoundError(`run ${runId} not found`);
     if (!TERMINAL_RUN_STATUSES.includes(run.status)) {
-      throw new ConflictError(`run ${runId} is ${run.status}, cancel it before deleting`);
+      throw new ConflictError(
+        `run ${runId} is ${run.status}, cancel it before deleting`,
+      );
     }
     await this.store.deleteRun(runId);
   }
@@ -229,7 +310,8 @@ export class Engine {
 
   /** Resolves once this process drives no runs, including runs launched while waiting. */
   async idle(): Promise<void> {
-    while (this.active.size > 0) await Promise.allSettled([...this.active.values()].map((r) => r.done));
+    while (this.active.size > 0)
+      await Promise.allSettled([...this.active.values()].map((r) => r.done));
   }
 
   /** Claims runs that have no live lease and starts driving them. */
@@ -239,8 +321,12 @@ export class Engine {
       const now = this.clock.now();
       for (const runId of await this.store.claimableRuns(now)) {
         if (this.active.has(runId)) continue;
-        const previousOwner = (await this.store.getRun(runId))?.leaseOwner ?? null;
-        if (await this.store.claimRun(runId, this.workerId, now, this.leaseTtlMs)) this.launch(runId, { previousOwner });
+        const previousOwner =
+          (await this.store.getRun(runId))?.leaseOwner ?? null;
+        if (
+          await this.store.claimRun(runId, this.workerId, now, this.leaseTtlMs)
+        )
+          this.launch(runId, { previousOwner });
       }
     } catch (err) {
       console.error(`[relay] sweep failed in worker ${this.workerId}`, err);
@@ -251,7 +337,14 @@ export class Engine {
     const now = this.clock.now();
     for (const [runId, run] of this.active) {
       try {
-        if (!(await this.store.heartbeat(runId, this.workerId, now, this.leaseTtlMs))) {
+        if (
+          !(await this.store.heartbeat(
+            runId,
+            this.workerId,
+            now,
+            this.leaseTtlMs,
+          ))
+        ) {
           run.controller.abort(new LeaseGone());
         } else if ((await this.store.getRun(runId))?.status === "cancelled") {
           run.controller.abort(new Cancelled());
@@ -264,14 +357,23 @@ export class Engine {
   }
 
   /** Heartbeats run only while this process drives at least one run. */
-  private launch(runId: string, takeover: { previousOwner: string | null } | null): void {
+  private launch(
+    runId: string,
+    takeover: { previousOwner: string | null } | null,
+  ): void {
     const controller = new AbortController();
     const done = this.drive(runId, controller.signal, takeover)
-      .catch((err) => console.error(`[relay] run ${runId} crashed in worker ${this.workerId}`, err))
+      .catch((err) =>
+        console.error(
+          `[relay] run ${runId} crashed in worker ${this.workerId}`,
+          err,
+        ),
+      )
       .then(async () => {
         const reason = controller.signal.reason;
         const crashed = reason instanceof Shutdown && !reason.graceful;
-        if (!crashed) await this.store.releaseRun(runId, this.workerId).catch(() => {});
+        if (!crashed)
+          await this.store.releaseRun(runId, this.workerId).catch(() => {});
       })
       .finally(() => {
         this.active.delete(runId);
@@ -281,20 +383,43 @@ export class Engine {
         }
       });
     this.active.set(runId, { controller, done });
-    this.heartbeatTimer ??= setInterval(() => void this.heartbeat(), this.heartbeatMs);
+    this.heartbeatTimer ??= setInterval(
+      () => void this.heartbeat(),
+      this.heartbeatMs,
+    );
   }
 
-  private async drive(runId: string, signal: AbortSignal, takeover: { previousOwner: string | null } | null): Promise<void> {
+  private async drive(
+    runId: string,
+    signal: AbortSignal,
+    takeover: { previousOwner: string | null } | null,
+  ): Promise<void> {
     // Steps a dead owner left running go back to pending. Their attempt counts stay.
-    const stale = (await this.store.getSteps(runId)).filter((s) => s.status === "running").map((s) => s.stepId);
+    const stale = (await this.store.getSteps(runId))
+      .filter((s) => s.status === "running")
+      .map((s) => s.stepId);
     const events: PendingEvent[] = takeover
-      ? [["run.lease_taken", { workerId: this.workerId, previousOwner: takeover.previousOwner, resetSteps: stale }]]
+      ? [
+          [
+            "run.lease_taken",
+            {
+              workerId: this.workerId,
+              previousOwner: takeover.previousOwner,
+              resetSteps: stale,
+            },
+          ],
+        ]
       : [];
     const claimed = await commit(
       this.schedulerDeps,
       runId,
       async () => {
-        await this.store.resetSteps(runId, ["running"], "pending", this.workerId);
+        await this.store.resetSteps(
+          runId,
+          ["running"],
+          "pending",
+          this.workerId,
+        );
         return (await this.store.getRun(runId))?.leaseOwner === this.workerId;
       },
       events,
@@ -304,15 +429,29 @@ export class Engine {
     let runtime: { deps: SchedulerDeps; planner?: Planner };
     try {
       const resolved = await this.resolveRuntime?.(runId);
-      runtime = { deps: { ...this.schedulerDeps, ...resolved }, planner: resolved?.planner ?? this.planner };
+      runtime = {
+        deps: { ...this.schedulerDeps, ...resolved },
+        planner: resolved?.planner ?? this.planner,
+      };
     } catch {
-      await this.failPlanning(runId, "The saved provider connection is unavailable. Restore the connection or start a new run.", [], null);
+      await this.failPlanning(
+        runId,
+        "The saved provider connection is unavailable. Restore the connection or start a new run.",
+        [],
+        null,
+      );
       return;
     }
 
-    if ((await this.store.getRun(runId))!.status === "planning" && !(await this.planRun(runId, signal, runtime))) return;
+    if (
+      (await this.store.getRun(runId))!.status === "planning" &&
+      !(await this.planRun(runId, signal, runtime))
+    )
+      return;
 
-    const scheduler = new RunScheduler(runId, runtime.deps, { onStepFailed: this.replanHook(runId, runtime) });
+    const scheduler = new RunScheduler(runId, runtime.deps, {
+      onStepFailed: this.replanHook(runId, runtime),
+    });
     const result = await scheduler.run(signal);
 
     const reason = signal.reason;
@@ -322,7 +461,11 @@ export class Engine {
   }
 
   /** Builds the graph for a goal run. Returns true when the run is ready to schedule. */
-  private async planRun(runId: string, signal: AbortSignal, runtime: { deps: SchedulerDeps; planner?: Planner }): Promise<boolean> {
+  private async planRun(
+    runId: string,
+    signal: AbortSignal,
+    runtime: { deps: SchedulerDeps; planner?: Planner },
+  ): Promise<boolean> {
     const run = (await this.store.getRun(runId))!;
     if (!runtime.planner || !run.goal || !run.profile) {
       await this.failPlanning(runId, "planning is not configured", [], null);
@@ -330,7 +473,11 @@ export class Engine {
     }
 
     try {
-      const { graph, usage, attempts } = await runtime.planner.plan(run.goal, run.profile, signal);
+      const { graph, usage, attempts } = await runtime.planner.plan(
+        run.goal,
+        run.profile,
+        signal,
+      );
       if (signal.aborted) return false;
       const cost = costUsd(usage, runtime.deps.pricing);
       const now = this.clock.now();
@@ -338,41 +485,104 @@ export class Engine {
         this.schedulerDeps,
         runId,
         async () =>
-          (await this.store.addPlanningUsage(runId, usage, cost, this.workerId)) &&
-          (await this.store.installGraph(runId, graph, 1, [], now, this.workerId)) &&
-          (await this.store.setRunStatus(runId, "running", null, now, this.workerId)),
-        [["run.planned", { graph, attempts, usage: { ...usage, costUsd: cost } }]],
+          (await this.store.addPlanningUsage(
+            runId,
+            usage,
+            cost,
+            this.workerId,
+          )) &&
+          (await this.store.installGraph(
+            runId,
+            graph,
+            1,
+            [],
+            now,
+            this.workerId,
+          )) &&
+          (await this.store.setRunStatus(
+            runId,
+            "running",
+            null,
+            now,
+            this.workerId,
+          )),
+        [
+          [
+            "run.planned",
+            { graph, attempts, usage: { ...usage, costUsd: cost } },
+          ],
+        ],
       );
       return done !== null;
     } catch (err) {
       // Shutdown, cancel or a lost lease: whoever holds the run next plans it again.
       if (signal.aborted) return false;
-      if (err instanceof PlanningError) await this.failPlanning(runId, `planning failed: ${err.message}`, err.issues, err.usage, runtime.deps.pricing);
-      else await this.failPlanning(runId, `planning failed: ${err instanceof Error ? err.message : String(err)}`, [], null);
+      if (err instanceof PlanningError)
+        await this.failPlanning(
+          runId,
+          `planning failed: ${err.message}`,
+          err.issues,
+          err.usage,
+          runtime.deps.pricing,
+        );
+      else
+        await this.failPlanning(
+          runId,
+          `planning failed: ${err instanceof Error ? err.message : String(err)}`,
+          [],
+          null,
+        );
       return false;
     }
   }
 
-  private async failPlanning(runId: string, error: string, issues: string[], usage: PlanningError["usage"] | null, pricing = this.schedulerDeps.pricing): Promise<void> {
+  private async failPlanning(
+    runId: string,
+    error: string,
+    issues: string[],
+    usage: PlanningError["usage"] | null,
+    pricing = this.schedulerDeps.pricing,
+  ): Promise<void> {
     const totals = await this.store.totals(runId);
     await commit(
       this.schedulerDeps,
       runId,
       async () =>
-        (!usage || (await this.store.addPlanningUsage(runId, usage, costUsd(usage, pricing), this.workerId))) &&
-        (await this.store.setRunStatus(runId, "failed", error, this.clock.now(), this.workerId)),
+        (!usage ||
+          (await this.store.addPlanningUsage(
+            runId,
+            usage,
+            costUsd(usage, pricing),
+            this.workerId,
+          ))) &&
+        (await this.store.setRunStatus(
+          runId,
+          "failed",
+          error,
+          this.clock.now(),
+          this.workerId,
+        )),
       [["run.failed", { error, issues, totals }]],
     );
   }
 
   /** Replaces a failed branch through the planner while the run has re-plans left. */
-  private replanHook(runId: string, runtime: { deps: SchedulerDeps; planner?: Planner }): FailureHook | undefined {
+  private replanHook(
+    runId: string,
+    runtime: { deps: SchedulerDeps; planner?: Planner },
+  ): FailureHook | undefined {
     const planner = runtime.planner;
     if (!planner) return undefined;
 
     return async (stepId, error, signal) => {
       const run = await this.store.getRun(runId);
-      if (!run?.goal || !run.profile || !run.graph || run.replans >= run.maxReplans) return false;
+      if (
+        !run?.goal ||
+        !run.profile ||
+        !run.graph ||
+        run.replans >= run.maxReplans
+      )
+        return false;
 
       try {
         const result = await planner.replan(
@@ -393,8 +603,20 @@ export class Engine {
           this.schedulerDeps,
           runId,
           async () =>
-            (await this.store.addPlanningUsage(runId, result.usage, cost, this.workerId)) &&
-            (await this.store.installGraph(runId, result.graph, version, result.supersede, this.clock.now(), this.workerId)) &&
+            (await this.store.addPlanningUsage(
+              runId,
+              result.usage,
+              cost,
+              this.workerId,
+            )) &&
+            (await this.store.installGraph(
+              runId,
+              result.graph,
+              version,
+              result.supersede,
+              this.clock.now(),
+              this.workerId,
+            )) &&
             (await this.store.incrementReplans(runId, this.workerId)),
           [
             [
@@ -414,9 +636,19 @@ export class Engine {
       } catch (err) {
         if (signal.aborted) return false;
         if (err instanceof PlanningError) {
-          await this.store.addPlanningUsage(runId, err.usage, costUsd(err.usage, runtime.deps.pricing), this.workerId);
+          await this.store.addPlanningUsage(
+            runId,
+            err.usage,
+            costUsd(err.usage, runtime.deps.pricing),
+            this.workerId,
+          );
         }
-        await this.emit(runId, [["run.replan_failed", { stepId, error: err instanceof Error ? err.message : String(err) }]]);
+        await this.emit(runId, [
+          [
+            "run.replan_failed",
+            { stepId, error: err instanceof Error ? err.message : String(err) },
+          ],
+        ]);
         return false;
       }
     };
