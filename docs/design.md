@@ -1,4 +1,6 @@
-# Design notes
+# Engine design notes
+
+The current application architecture, private BYOK layer and hosting boundaries are described in [ARCHITECTURE.md](ARCHITECTURE.md). These notes retain the detailed engine algorithms and schema history; current SQL in `server/src/engine/store.ts` is authoritative.
 
 Relay is a durable workflow engine for LLM agents. You give it a goal. A planner model turns the goal into a graph of steps, the engine runs independent steps in parallel, and every result lands in Postgres. If the function or process driving a run dies, another one picks the run up and continues from the last finished step. Everything runs inside one Next.js app, so it deploys to Vercel with a Neon database and no separate backend.
 
@@ -104,6 +106,8 @@ A path that does not exist in the JSON output fails the step with a `TemplateErr
 
 ## Data model
 
+The schema below describes the original engine columns. This release adds `runs.owner_id`, `runs.connection_id`, `runs.execution_json`, `workspaces` and encrypted `connections`; see the architecture data diagram and current source SQL.
+
 Postgres. Production uses Neon through node-postgres with Neon's pooled connection string. Without `DATABASE_URL` the engine runs PGlite, Postgres compiled to WebAssembly, in `data/pglite`, so local development and tests need no database server. The store creates its tables on first use. Timestamps are epoch milliseconds in `BIGINT` columns.
 
 ```sql
@@ -165,7 +169,7 @@ step_cache (
 )
 ```
 
-Token counts and cost live only on `steps`. Run totals come from `SUM` over the run's steps, so the two can never disagree. Tokens from failed attempts are added to the step as they happen, because failed calls still cost money.
+Run totals combine recorded step usage with planning usage stored on the run. Usage is recorded before output validation, so invalid JSON attempts still contribute. Failed or interrupted requests without usage responses may incur charges Relay cannot reconstruct.
 
 Every state change and its event are written in one transaction, and that transaction first takes the run's row lock with `SELECT ... FOR UPDATE`. Writes to one run are therefore serialized across functions, and its events get ids in commit order. The event id is the cursor the dashboard polls from.
 
@@ -234,11 +238,11 @@ A run may set `budget_tokens`, `budget_usd`, or both. Before each launch the sch
 
 ### Rate limiting
 
-A token bucket with capacity `LLM_RPM / 6` that refills at `LLM_RPM / 60` tokens per second. Every run in the process shares it. On Vercel each function instance has its own bucket, so several busy instances can together go over the limit; the retry path handles the 429s that follow. `acquire(signal)` resolves in FIFO order and rejects if the signal aborts while waiting.
+A token bucket with capacity `LLM_RPM / 6` that refills at `LLM_RPM / 60` tokens per second. Library runs share the default bucket. Visitor runs share a bucket per saved connection within the process, including planning calls. On Vercel each function instance has its own bucket, so several busy instances can together go over the limit; the retry path handles the 429s that follow. `acquire(signal)` resolves in FIFO order and rejects if the signal aborts while waiting.
 
 ### Step cache
 
-The key is `sha256(JSON.stringify([model, resolvedPrompt, tools, outputSchema]))`. It is opt-in per step, because search results change over time. Hits are saved like normal results with `cached=1` so the UI can show them.
+The cache key hashes the runtime namespace, model, resolved prompt, tools and output schema. Visitor namespaces include workspace and connection ids. It is opt-in per step, because search results change over time. Hits are saved like normal results with `cached=1` so the UI can show them.
 
 ### Leases, crash recovery, and multiple processes
 
@@ -250,7 +254,7 @@ Each engine instance gets a `workerId` (a random UUID) when it starts. On Vercel
 - **Fencing.** Every owner write includes `AND EXISTS (SELECT 1 FROM runs WHERE id=? AND lease_owner=? AND status IN ('planning','running'))`. A stale owner that wakes up after losing its lease cannot overwrite the new owner's work. Because the fence also checks status, a cancel written by any process blocks the owner's writes at once, and the owner's next heartbeat aborts its in-flight calls.
 - **Graceful shutdown.** `engine.stop()` stops claiming, aborts in-flight calls, resets its running steps to `pending`, and clears its leases, so another instance resumes right away without waiting 30 seconds. A function killed at its time limit gets no such chance; that is the crash case above.
 
-This gives at-least-once execution per step. A step killed in the middle of a model call runs again, which is acceptable for model calls because they have no side effects. A succeeded step never runs again.
+This gives at-least-once execution per step. A step killed in the middle of a model call runs again and can incur another charge. A succeeded checkpoint is retained. Side-effecting tools require external idempotency controls.
 
 ## Planner
 
@@ -295,7 +299,7 @@ interface LlmProvider {
 
 `GeminiProvider` maps `usageMetadata.promptTokenCount` plus `toolUsePromptTokenCount` to input tokens, and `candidatesTokenCount` plus `thoughtsTokenCount` to output tokens. It reads `groundingMetadata.groundingChunks[].web` for sources and counts `webSearchQueries.length > 0` as one search call. Errors turn into `LlmError { status, retryAfterMs }`.
 
-Default pricing for `gemini-3.5-flash` is $1.50 per 1M input tokens, $9.00 per 1M output tokens, and $14 per 1,000 search calls. `PRICE_INPUT_PER_M`, `PRICE_OUTPUT_PER_M`, and `PRICE_SEARCH_PER_K` override them.
+The legacy library pricing constant for `gemini-3.5-flash` is $1.50 per 1M input tokens, $9.00 per 1M output tokens, and $14 per 1,000 search calls. `PRICE_INPUT_PER_M`, `PRICE_OUTPUT_PER_M`, and `PRICE_SEARCH_PER_K` override them. Browser connections use their own estimates; verify current provider rates.
 
 `FakeProvider` takes a handler `(req, callIndex) => result | Error` and an optional delay. Tests and the benchmark use it, so neither needs an API key.
 
@@ -303,14 +307,14 @@ Default pricing for `gemini-3.5-flash` is $1.50 per 1M input tokens, $9.00 per 1
 
 Next.js App Router with Tailwind, `@xyflow/react` for the graph, `@dagrejs/dagre` for left-to-right layout, and `react-markdown` for reports.
 
-- **`/`** shows the run list with status, goal, step counts, cost, and age. Two forms start runs: a goal box with a profile picker and budget fields, and a JSON graph editor that shows validation issues returned by the API.
+- **`/`** is the showcase. **`/playground`** holds templates, goal/JSON forms and private run history. **`/connections`** manages encrypted BYOK credentials. **`/architecture`** explains the engine and local agents.
 - **`/runs/[id]`** has four parts.
   - A header with status, elapsed time, tokens, cost, graph version, and Cancel and Retry buttons.
   - The graph. Node color follows status, edges into running steps animate, cached steps get a badge, and superseded steps render faded. A replan re-fetches the run and runs the layout again.
   - A side panel for the selected step: resolved prompt, output (markdown or JSON), sources as links, attempts, error, tokens, and cost.
   - Tabs for the final report and the event timeline.
 
-Live updates poll `GET /api/runs/:id/events?after=<last id>` every second while the run is going and every 10 seconds once it has finished. A reducer applies each event to the run state. Each poll starts after the last event received, so no event goes missing or applies twice. Polling suits serverless better than a stream: a stream would hold a function open for as long as the page stays open.
+Live updates poll `GET /api/runs/:id/events?after=<last id>` every second while the run is going and every 10 seconds once it has finished. A reducer applies each event to the run state. Each poll starts after the last event received, so the reducer can ignore duplicates and snapshot-covered events while applying later events in order. Polling suits serverless better than a stream: a stream would hold a function open for as long as the page stays open.
 
 ## Benchmark and demos
 

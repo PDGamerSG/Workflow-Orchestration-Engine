@@ -1,211 +1,171 @@
 # Relay
 
-A durable workflow engine for LLM agents. Describe a goal, and a planner model turns it into a graph of steps. The engine runs independent steps in parallel, saves every result to Postgres, and picks the run back up after a crash without repeating finished work. A dashboard draws the graph and fills it in live. It is one Next.js app with no separate backend: it deploys to Vercel with a free Neon database and runs on free models from Groq, Cerebras or OpenRouter.
+**Individual portfolio project**
 
-![The run view: a graph of finished steps, the selected step's output and cost, and the event timeline](docs/images/run-view.png)
+- [Pallab Das](https://github.com/PDGamerSG)
 
-## What it does
+Live link: [relay.pallabdas.me](https://relay.pallabdas.me/)
 
-- Starts each step as soon as its inputs are ready, instead of waiting for a whole level. On a graph with one slow branch that is 3.83 s against 4.65 s for level by level.
-- Passes results between steps with templates: `{{step_id.output}}`, `{{step_id.output.field[0]}}` for JSON steps, and `{{step_id.sources}}` for search citations. A reference also adds the dependency, so you don't declare it twice.
-- Recovers from a crash. The function driving a run holds it through a lease it renews every few seconds. If that function dies, for example at Vercel's time limit, the next request claims the run once the lease expires, resets the steps that were in flight, and keeps everything that already finished.
-- Re-plans a failed branch. When a step runs out of retries, the planner writes replacement steps and the engine points the downstream steps at them.
-- Tracks cost per attempt: input and output tokens, search calls, USD. A run can have a token or dollar budget, and no new steps start once it's spent.
-- Updates the dashboard live by polling for new events after the last one it has.
+<p align="center">
+  <img src="docs/images/hero.png" width="760" alt="Relay homepage with a runnable workflow demo and an interactive dependency diagram" />
+</p>
 
-## The dashboard
+Relay turns a goal into a graph of model calls, runs independent steps in parallel, and saves progress so another worker can continue after a crash. Try the labelled simulation without a key, or connect your own model provider and inspect each prompt, result, attempt and event.
 
-Until you click a step, the side panel shows whatever is relevant: the running step, the failed one, or the final result. Clicking a step puts it in the URL as `?step=`, so you can link to it. Timeline entries also open their step. The result can be copied or downloaded as markdown with its sources. The run list has status filters, search, and delete.
+This repository contains the TypeScript orchestration engine, a Next.js playground, local adapters for Pi, Claude Code and Codex, and reproducible reliability demos. The scheduler, checkpoints, leases, retry policy and graph rewrites are implemented here rather than delegated to an orchestration framework.
 
-## Quick start
+## Features
 
-```bash
-bun install
-
-# No API key: scripted replies with realistic delays
-LLM_PROVIDER=demo bun run dev
-```
-
-Open http://localhost:3000. The dashboard and its API (`/api`) are one app. Without `DATABASE_URL` it stores runs in PGlite, an in-process Postgres, under `web/data/pglite`, so no database server is needed locally.
-
-To use a real model, pick a provider and put its key in `.env` at the repo root (see `.env.example`). Groq, Cerebras and OpenRouter all have free models and need nothing but a key:
-
-```bash
-LLM_PROVIDER=groq
-GROQ_API_KEY=your-key
-```
-
-| `LLM_PROVIDER` | Key | Default model | Free-tier requests per minute |
-|---|---|---|---|
-| `groq` | `GROQ_API_KEY` from [console.groq.com](https://console.groq.com/keys) | `openai/gpt-oss-120b` | 30 |
-| `cerebras` | `CEREBRAS_API_KEY` from [cloud.cerebras.ai](https://cloud.cerebras.ai) | `gpt-oss-120b` | 30 |
-| `openrouter` | `OPENROUTER_API_KEY` from [openrouter.ai](https://openrouter.ai/keys) | `nvidia/nemotron-3-super-120b-a12b:free` | 20 |
-| `gemini` | `GOOGLE_API_KEY` from [AI Studio](https://aistudio.google.com/apikey) | `gemini-3.5-flash` | 5 on the free tier, so set `LLM_RPM=5` |
-
-Then `bun run dev`. `LLM_MODEL` picks another model from the same provider, for example `openai/gpt-oss-20b` on Groq or any `:free` model on OpenRouter that supports structured outputs.
-
-Only Gemini has a search tool. With the other providers, and with `SEARCH_ENABLED=false` on Gemini, research runs answer from model knowledge, and the prompts tell the writer not to make up citations.
-
-## Deploy
-
-The app deploys to [Vercel](https://vercel.com) as it is, with [Neon](https://neon.com) for the database. Both have free plans that do not sleep: Neon pauses its compute after a few idle minutes and wakes on the next query in well under a second.
-
-1. Push the repo to GitHub.
-2. In Vercel, choose **Add New > Project**, import the repository, and set **Root Directory** to `web`. Vercel detects Next.js and installs the Bun workspace from the repo root.
-3. Under **Environment Variables**, add `LLM_PROVIDER=groq` and your `GROQ_API_KEY` (or another provider from the table above).
-4. Deploy, then open the project's **Storage** tab, choose **Create Database > Neon**, and connect it to the project. That adds `DATABASE_URL`. Redeploy so the functions pick it up. The tables are created on the first request.
-
-The site is live at `https://<project>.vercel.app`.
-
-How a run fits in a serverless function: starting a run launches it inside the request's function, and `after()` keeps the function alive until the run settles, up to Vercel's 300 second limit on the Hobby plan. A run that goes longer loses its function. Its lease expires 30 seconds later, and the next request to `/api`, which the dashboard sends every second while you watch a run, takes it over and continues from the last finished step. A run left alone with nobody watching waits for the next visit.
+| Feature | What it does |
+| --- | --- |
+| Goal planning and graph JSON | Generate a validated DAG from a goal or define dependencies yourself. |
+| Parallel scheduling | Start each step as soon as its own inputs succeed, with concurrency and rate limits. |
+| Durable recovery | Persist results and events in Postgres; expiring leases and fenced writes coordinate workers. |
+| Failure handling | Retry transient failures, validate JSON outputs, re-plan failed goal branches, cancel or retry a run. |
+| Bring your own key | Save an encrypted OpenAI, Anthropic, Gemini, Groq, Cerebras or OpenRouter connection in a private browser workspace. |
+| Inspect and export | Explore the live graph, resolved prompts, timeline, token usage and estimated cost; export Markdown, graph JSON and trace JSON. |
+| Local coding agents | Run Pi, Claude Code and Codex through shell-free process adapters with timeouts, cancellation and usage parsing. |
+| Reproducible demonstrations | Six templates, a deterministic retry lab, a crash-recovery demo and simulated-latency benchmarks. |
 
 ## How it works
 
-```mermaid
-flowchart LR
-  subgraph web [web: Next.js app on Vercel]
-    UI[Run list, live graph, step panel]
-    ROUTE["/api route"]
-  end
-  subgraph server [server: engine package]
-    API[HTTP handler]
-    PL[Planner]
-    SCH[Scheduler]
-    LSE[Leases and sweeper]
-    LLM[Model provider: Gemini, Groq, Cerebras, OpenRouter or demo]
-  end
-  DB[(Postgres: Neon, or PGlite locally)]
+The browser submits a workflow; the engine validates it and checkpoints every completed step.
 
-  UI -- fetch and poll --> ROUTE --> API
-  API --> PL --> LLM
-  API --> SCH --> LLM
-  SCH --> DB
-  LSE --> DB
-  API -- tail events --> DB
+```mermaid
+flowchart TB
+  subgraph app ["Next.js application"]
+    browser["Playground and run inspector<br/>web/app"]
+    api["Private workspace API<br/>server/src/platform"]
+    engine["Planner, scheduler and leases<br/>server/src/engine"]
+  end
+  subgraph storage ["Persistent storage"]
+    db[("Runs, steps, events and encrypted keys<br/>Postgres or PGlite")]
+  end
+  subgraph inference ["Execution providers"]
+    models["Visitor's selected model API<br/>server/src/llm"]
+  end
+  browser --> api --> engine
+  api --> db
+  engine --> db
+  engine --> models
+  browser -.->|"poll events after cursor"| api
 ```
 
-**Planning.** A goal run starts in `planning`. For the research profile the model only picks 3 to 6 sub-questions, and code builds the researcher, fact check and report steps from them, so the shape is always the same. For the general profile the model writes the steps itself. Either way the result goes through the same validation as a hand-written graph: unknown ids, self references and cycles are rejected, and the issues go back to the model for up to 3 attempts.
+A goal goes through a planner; a submitted graph goes directly through validation. The scheduler resolves dependency templates, starts ready steps, and commits state with its event. Another worker can claim an expired lease and resume unfinished steps. Model API credentials come from the run's saved connection. Local agent adapters use the same provider interface in a separate, local process. See the [architecture](docs/ARCHITECTURE.md) and [source comparison](docs/research/agent-systems.md).
 
-**Scheduling.** A step is ready when every dependency has succeeded. The scheduler starts ready steps up to the run's concurrency, resolves each prompt from saved outputs at launch time, and re-checks the ready set whenever a step settles.
+## Screenshots
 
-**Failure handling.** Timeouts, 429s, 5xx and JSON that does not match a step's schema are retried with exponential backoff and jitter, and a 429 that carries a retry delay waits exactly that long. Bad requests and template errors fail immediately. A step that runs out of attempts either gets replaced by a re-plan or skips its descendants while other branches continue.
+Captured from the local application in Chromium at 1440 × 900. The run shown uses scripted demo responses, with real scheduling and database writes.
 
-**Durability.** Every state change and its event commit in one Postgres transaction that holds the run's row lock, and the event id doubles as the dashboard's polling cursor, so it picks up exactly what it has not seen. Writes by a run's owner are fenced: they only apply while that worker still holds the lease and the run is still active. A cancel from any function therefore stops the owner's writes at once.
+<p align="center">
+  <img src="docs/images/dashboard.png" width="860" alt="Completed Relay workflow showing parallel branches, saved step results and the event timeline" />
+</p>
 
-This gives at-least-once execution per step. A step killed mid-call runs again, which is safe here because a model call has no side effects. A step that already succeeded never runs again.
+*The run inspector exposes execution state, dependencies, usage and outputs.*
 
-## Crash recovery demo
+<table>
+  <tr>
+    <td><img src="docs/images/playground.png" width="430" alt="Playground with templates, provider selection and graph JSON" /><br/>Choose a template or define your own graph.</td>
+    <td><img src="docs/images/connections.png" width="430" alt="Provider connection form with a password field and private workspace explanation" /><br/>Connect a provider with your own API key.</td>
+  </tr>
+</table>
+
+## Tech stack
+
+| Component | Purpose | License |
+| --- | --- | --- |
+| TypeScript and Bun | Engine, scripts, tests and workspace tooling | Apache-2.0 / MIT |
+| Next.js 16 and React 19 | Website and same-origin HTTP API | MIT |
+| Postgres / PGlite | Transactions, checkpoints, leases and event history | PostgreSQL / Apache-2.0 |
+| React Flow and Dagre | Interactive graph and automatic layout | MIT |
+| Zod and Ajv | Input validation and JSON output contracts | MIT |
+| Playwright | Browser workflow verification | Apache-2.0 |
+| Vercel and Neon | Hosted application and pooled Postgres | Service terms |
+
+See [third-party notices](THIRD_PARTY_NOTICES.md) for fonts, rendering packages and integration boundaries.
+
+## Quick start
+
+Use Bun 1.4.4 and Node.js 24 or newer. No API key or database server is required for the demo.
 
 ```bash
-cd server && bun run demo:crash
+git clone https://github.com/PDGamerSG/Workflow-Orchestration-Engine.git
+cd Workflow-Orchestration-Engine
+bun install --frozen-lockfile
+cp .env.example .env
+bun run dev
 ```
 
-It starts two engines on one database, stops the first mid-step with no cleanup, the way a function dies at its time limit, and lets the second take over:
+Open [localhost:3000](http://localhost:3000). Click **Run the demo**, or use **Connections** to validate and save your own key. Public runs always use the selected connection or the simulation. Deployment-level API keys are not used for visitor runs. Local data lives in `web/data/pglite` unless `DATABASE_URL` is set.
 
-```
-[demo] worker A died after step_1, step_2, step_3 finished
-[demo] worker B waits for A's 4 s lease to expire, then takes over
-[demo] run succeeded 6.8 s after worker B started
-
-finished before the crash: step_1, step_2, step_3
-restarted by worker B:      step_4
-steps finished twice:       none
-final attempts per step:    step_1=1 step_2=1 step_3=1 step_4=2 step_5=1 step_6=1
-```
-
-## Benchmark
-
-`cd server && bun run bench` measures scheduling against simulated latency and writes [docs/benchmark.md](docs/benchmark.md). A 12-step research graph that takes 10.40 s one step at a time finishes in 4.49 s at four steps at once, and 3.64 s at eight. The floor is the longest dependency chain.
-
-## HTTP API
-
-The routes live under `/api`.
-
-| Method and path | What it does |
-|---|---|
-| `POST /runs` | Starts a run from `{ goal, profile }` or `{ graph }`, plus optional `concurrency`, `maxReplans` and `budget`. Returns `{ runId }` at once. |
-| `GET /runs` | Recent runs with step counts and totals. |
-| `GET /runs/:id` | The run, its steps, totals, and the id of the last event they include. |
-| `GET /runs/:id/events?after=` | Up to 500 events after the given event id, oldest first. The dashboard polls this. |
-| `POST /runs/:id/cancel` | Cancels a planning or running run, whichever function drives it. |
-| `POST /runs/:id/retry` | Re-runs the failed and skipped steps of a failed run. |
-| `DELETE /runs/:id` | Removes a finished run with its steps and events. An unfinished run has to be cancelled first. |
-| `GET /health` | Liveness and the worker id. |
-
-Errors are always `{ "error": { "code", "message", "issues"? } }`, and an invalid graph comes back with every validation issue.
-
-A hand-written graph looks like this:
-
-```json
-{
-  "graph": {
-    "steps": [
-      { "id": "pros", "prompt": "List the strongest arguments for X." },
-      { "id": "cons", "prompt": "List the strongest arguments against X." },
-      { "id": "verdict", "prompt": "Weigh these:\n{{pros.output}}\n{{cons.output}}", "final": true }
-    ]
-  }
-}
-```
-
-`pros` and `cons` run at the same time, and `verdict` starts when both finish.
-
-## Configuration
-
-Set these in `.env` at the repo root for local development, and under the project's Environment Variables on Vercel.
-
-| Variable | Default | Notes |
-|---|---|---|
-| `LLM_PROVIDER` | `gemini` | `gemini`, `groq`, `cerebras`, `openrouter`, or `demo`, which replies without a key |
-| `GOOGLE_API_KEY`, `GROQ_API_KEY`, `CEREBRAS_API_KEY`, `OPENROUTER_API_KEY` | | Only the chosen provider's key is required |
-| `LLM_MODEL` | The provider's default free model | `GEMINI_MODEL` still works for Gemini |
-| `LLM_RPM` | The provider's free-tier limit, or `60` for Gemini | Shared token bucket for every run in the process. `GEMINI_RPM` still works for Gemini |
-| `SEARCH_ENABLED` | `true` | Gemini only. Turn off for keys without grounding quota |
-| `DEMO_FAILURE_RATE` | `0` | With `LLM_PROVIDER=demo`, the share of step calls that fail like an overloaded API. Planner calls never fail, so retries, re-plans and skips can be watched without a key |
-| `LEASE_TTL_MS` | `30000` | How long a dead worker's runs wait before another claims them |
-| `DATABASE_URL` | | Postgres connection string. Use Neon's pooled one. Required on Vercel |
-| `PGLITE_DIR` | `data/pglite` | Where runs are stored when `DATABASE_URL` is not set |
-| `PRICE_INPUT_PER_M`, `PRICE_OUTPUT_PER_M`, `PRICE_SEARCH_PER_K` | Gemini 3.5 Flash list prices, or `0` for the free providers | Used for cost tracking |
-
-## Layout
-
-```
-server/src/engine     graph validation, templates, Postgres store, scheduler, engine, leases
-server/src/planner    goal to graph, research profile, re-planning
-server/src/llm        provider interface, Gemini, OpenAI-compatible APIs, demo provider, pricing
-server/src/api        HTTP routes as a fetch-style handler
-server/src/relay.ts   builds the engine from the environment
-server/scripts        benchmark and crash recovery demo
-web/app/api          the catch-all route that runs the engine
-web/lib               API client, run state reducer, graph layout, step selection
-web/components        graph, step panel, timeline, forms
-docs/design.md        design notes: data model, leases, re-planning
-```
-
-## Tests
+### Checks
 
 ```bash
 bun run test
 bun run typecheck
+bun run lint
+bun run build
+cd web
+bunx playwright install chromium
+bun run test:e2e
 ```
 
-The engine tests run two `Engine` instances on one database to test lease takeover, fencing and crash recovery. They use an in-memory PGlite, and a fake provider stands in for the model, so they need no database server, API key or network. `TEST_DATABASE_URL=postgres://...` runs the same tests against a real Postgres server; CI does both.
+The [verification report](docs/testing/verification.md) records database tests, browser workflows, dependency audit and external-service limitations.
 
-## Design decisions
+### Reliability and agent demos
 
-Postgres instead of a queue and a worker pool. Leases and fenced writes already guarantee that one worker drives a run and a stale worker can't write, so the database is the only shared piece. That is what lets the engine run inside serverless functions: any instance can pick up any run.
+```bash
+bun run demo:crash
+bun run bench
+# Requires locally installed and authenticated agent CLIs:
+bun run demo:agents --agent=codex
+bun run demo:agents
+```
 
-Polling instead of a stream. A server-sent event stream would keep a function running for as long as a page stays open. A poll is one short query, and the dashboard slows down once a run has finished.
+The crash demo preserves completed steps and repeats only work interrupted before a checkpoint. The benchmark uses fixed simulated model latency: concurrency 4 completed the 12-step workload in 4.48 s versus 10.40 s at concurrency 1. These numbers measure scheduling, not model quality or live API throughput. See [benchmark results](docs/benchmark.md) and the [agent guide](docs/agents.md).
 
-At-least-once, not exactly-once. A step interrupted mid-call runs again, because the engine can't know whether the model answered. That's fine for model calls since they have no side effects. A step with side effects would need an idempotency key.
+### Deploy
 
-The model writes prompts, code changes the graph. The planner picks sub-questions and writes prompts. Building the research shape, merging a re-plan, renaming references and validation all happen in code, where they have tests.
+The site runs on Vercel with Neon Postgres. Import the repository with root directory `web`, set `DATABASE_URL` and a stable private `RELAY_SECRET` of at least 32 characters, and deploy. No model API key is required on the server. Follow the [deployment guide](docs/operations/deployment.md) for persistence, recovery, DNS and rollback.
 
-Budgets stop new steps, not running ones. Checking before each launch is cheap. Steps already in flight can push the total a little past the limit.
+## Repository map
 
-## Limits
+| Path | What it holds |
+| --- | --- |
+| `server/src/engine/` | DAG validation, scheduling, transactions, leases, retries, budgets and cache |
+| `server/src/planner/` | General and research planning, validation feedback and branch replacement |
+| `server/src/platform/` | Browser workspaces, connection encryption, ownership checks and per-run runtimes |
+| `server/src/llm/` | Model API adapters, scripted simulation and pricing |
+| `server/src/agents/` | Local subprocess execution and Pi, Claude Code and Codex protocol mapping |
+| `server/src/templates/` | Shared workflow catalog and execution tests |
+| `server/scripts/`, `examples/` | Benchmarks, crash demonstration and multi-agent graph |
+| `web/app/`, `web/components/` | Showcase, playground, connections, architecture and run inspector |
+| `web/lib/`, `web/e2e/` | API client, event reducer, exports and browser tests |
+| `docs/` | Architecture, setup, security, testing, research and presentation guides |
 
-- One model per process. Other APIs need an `LlmProvider` implementation unless they speak the OpenAI chat completions format.
-- Steps are model calls. There are no HTTP or code steps.
-- A run longer than the function limit (300 s on Vercel Hobby) only continues while someone has the dashboard open, since requests are what resume it.
-- No auth. Anyone with the link to a deployment can start, cancel and delete runs, and every run spends the deployment's API quota.
+## Documentation
+
+- [Documentation index](docs/README.md): setup, usage and engineering references.
+- [Architecture](docs/ARCHITECTURE.md): request flow, data model, scheduling and recovery guarantees.
+- [Configuration](docs/CONFIGURATION.md): deployment secrets, local storage and provider settings.
+- [User guide](docs/user-guide.md): templates, BYOK, run inspection, retries and exports.
+- [API](docs/api/README.md): cookie-scoped requests, schemas and errors.
+- [Pi, Claude Code and Codex](docs/agents.md): how each adapter wraps an existing agent loop.
+- [Security](docs/security/threat-model.md): credential handling, workspace boundaries and remaining risks.
+- [Testing](docs/testing/test-plan.md): automated checks and how to reproduce the evidence.
+- [Portfolio presentation](docs/portfolio.md): a five-minute demo and technical interview discussion.
+- [Troubleshooting](docs/TROUBLESHOOTING.md): startup, provider, quota and recovery issues.
+
+## Known limits
+
+- A browser cookie is the workspace credential. There is no account login, cross-device sync or recovery after the cookie is lost or expires.
+- Serverless recovery needs a later API request. Unattended execution needs a persistent worker or scheduled wakeup.
+- Interrupted steps execute at least once and can incur repeated provider charges. Side-effecting tools would require idempotency controls.
+- The hosted site runs model calls. Pi, Claude Code and Codex execute locally; the public API cannot launch them or arbitrary commands.
+- Dollar totals are estimates from supplied token prices. Budgets stop new steps after recorded usage reaches the limit; in-flight calls can exceed it. Rate limits are per process and connection.
+- Authenticated live provider and coding-agent executions were not verified in this release environment because working credentials were unavailable. Process/protocol fixtures and the public simulation are verified.
+- This is a portfolio deployment with per-workspace run limits, not a multi-tenant service with billing, abuse prevention, SSO or a job-completion SLA.
+
+## License
+
+No project license has been declared. Contact Pallab Das before reusing project code. Third-party components retain their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
