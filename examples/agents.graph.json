@@ -1,0 +1,8 @@
+{
+  "steps": [
+    { "id": "pi_analysis", "prompt": "Explain dependency-ready DAG scheduling in 60 words. Use no tools. State one practical advantage over sequential execution.", "retries": 0 },
+    { "id": "claude_analysis", "prompt": "Explain lease fencing in a durable workflow engine in 60 words. Use no tools. State one failure mode it prevents.", "retries": 0 },
+    { "id": "codex_analysis", "prompt": "Explain at-least-once workflow execution in 60 words. Use no tools. State why a side-effecting step needs an idempotency key.", "retries": 0 },
+    { "id": "synthesis", "prompt": "Combine these three analyses into a concise explanation of Relay's orchestration model. Do not use tools.\n\nPi:\n{{pi_analysis.output}}\n\nClaude Code:\n{{claude_analysis.output}}\n\nCodex:\n{{codex_analysis.output}}", "final": true, "retries": 0 }
+  ]
+}

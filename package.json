@@ -11,6 +11,9 @@
     "test": "bun --filter '*' test",
     "typecheck": "bun --filter '*' typecheck",
     "bench": "bun --filter '@relay/server' bench",
-    "demo:crash": "bun --filter '@relay/server' demo:crash"
+    "demo:crash": "bun --filter '@relay/server' demo:crash",
+    "demo:agents": "bun server/scripts/agents-demo.ts",
+    "build": "bun --filter '@relay/web' build",
+    "lint": "bun --filter '@relay/web' lint"
   }
 }

@@ -219,6 +219,7 @@ export class RunScheduler {
     try {
       return await this.deps.provider.generate({
         prompt,
+        stepId: def.id,
         tools: def.tools.length ? def.tools : undefined,
         jsonSchema: schema,
         signal: attempt.signal,
